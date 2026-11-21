@@ -16,10 +16,9 @@ Guardar lo que acaba de pasar en el juego con una tecla, en alta calidad y con e
 - Los dos controles de volumen del micrófono se muestran como porcentajes. La escala propuesta va de 0% (silencio) a 200% (doble de ganancia), con 100% como nivel original y una acción para restablecerlo.
 - En Captura, cada fila del mezclador reúne la casilla para incluir la pista y su volumen en porcentaje. Al excluir y volver a incluir una fuente se recupera su volumen. La fila del micrófono comparte el valor global de Ajustes. El botón «Buscar pistas» vuelve a consultar las fuentes y agrega las nuevas sin duplicar pistas ni reiniciar niveles.
 
-## Enfoques considerados
+## Plataforma elegida
 
-- **Rust nativo, elegido por el usuario.** Captura y codificación mediante las API de Windows, con las imágenes en la GPU cuando el hardware lo permita. Permite controlar la memoria y el trabajo que continúa en segundo plano. Tiene más trabajo inicial de integración y pruebas por GPU.
-- **C# y FFmpeg.** Permite prototipar más rápido y la captura de monitor ya se comprobó en este equipo. También puede usar hardware si se valida la ruta de GPU, pero añade un binario externo y limita el control directo sobre el ciclo de captura y el búfer. La plantilla anterior se conserva como referencia durante el diseño.
+- **Rust nativo para Windows.** Captura y codificación mediante las API de Windows, con las imágenes en la GPU cuando el hardware lo permita. Permite controlar la memoria y el trabajo que continúa en segundo plano. Tiene más trabajo inicial de integración y pruebas por GPU.
 - Cut es un proyecto independiente. Clippy es referencia para el flujo de replay, la bandeja y la codificación por hardware.
 
 ## Diseño técnico propuesto
