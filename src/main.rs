@@ -5,13 +5,23 @@ mod audio;
 #[cfg(windows)]
 mod capture_gpu;
 #[cfg(windows)]
+mod clip_name;
+#[cfg(windows)]
+mod cursor;
+#[cfg(windows)]
 mod desktop;
 #[cfg(windows)]
 mod gpu;
 #[cfg(windows)]
+mod hotkey;
+#[cfg(windows)]
 mod instance;
 #[cfg(windows)]
+mod microphone;
+#[cfg(windows)]
 mod mix;
+#[cfg(windows)]
+mod mixer_cache;
 #[cfg(windows)]
 mod mp4;
 #[cfg(windows)]

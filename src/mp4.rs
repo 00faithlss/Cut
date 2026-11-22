@@ -1,5 +1,5 @@
 use std::{
-    fs::OpenOptions,
+    fs::{File, OpenOptions},
     io::{self, BufWriter, Read, Seek, SeekFrom, Write},
     path::Path,
     sync::Arc,
@@ -33,6 +33,7 @@ fn ticks(time: Duration, timescale: u32) -> u64 {
 
 pub fn write(
     path: &Path,
+    file: File,
     video: &Video,
     frames: &[Arc<EncodedSample>],
     tracks: &[History],
@@ -59,7 +60,6 @@ pub fn write(
             .then_with(|| a.name.cmp(&b.name))
     });
 
-    let file = OpenOptions::new().write(true).create_new(true).open(path)?;
     let brands = [*b"isom", *b"iso2", *b"avc1", *b"mp41"].map(::mp4::FourCC::from);
     let mut mux = Mp4Writer::write_start(
         BufWriter::with_capacity(256 * 1024, file),

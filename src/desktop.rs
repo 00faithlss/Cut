@@ -6,10 +6,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use global_hotkey::{
-    GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
-    hotkey::{Code, HotKey},
-};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tao::platform::windows::{WindowBuilderExtWindows, WindowExtWindows};
@@ -23,9 +19,13 @@ use tray_icon::{
     Icon, TrayIconBuilder,
     menu::{Menu, MenuEvent, MenuItem},
 };
-use windows::Win32::{
-    Foundation::HWND,
-    Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn},
+use windows::{
+    Win32::{
+        Foundation::HWND,
+        Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn},
+        Media::Audio::{PlaySoundW, SND_ASYNC, SND_MEMORY, SND_NODEFAULT},
+    },
+    core::PCWSTR,
 };
 use windows_capture::{monitor::Monitor, window::Window};
 use winreg::{RegKey, enums::HKEY_CURRENT_USER};
@@ -36,6 +36,7 @@ use wry::{
 
 use crate::{
     audio,
+    mixer_cache::MixerCache,
     replay::{Profile, Replay, Result, Snapshot},
 };
 
@@ -181,6 +182,18 @@ enum Message {
     ToggleCapture,
     Exit,
     CaptureReleased,
+}
+
+fn play_clip_saved() {
+    static SOUND: &[u8] = include_bytes!("clip-saved.wav");
+    // PlaySound puede leer el WAV en segundo plano durante toda la reproducción.
+    unsafe {
+        let _ = PlaySoundW(
+            PCWSTR(SOUND.as_ptr().cast()),
+            None,
+            SND_MEMORY | SND_ASYNC | SND_NODEFAULT,
+        );
+    }
 }
 
 #[derive(Serialize)]
@@ -370,16 +383,6 @@ pub fn run() -> Result<()> {
         };
         let _ = menu_proxy.send_event(action);
     }));
-    let hotkey = GlobalHotKeyManager::new();
-    let registered = hotkey
-        .as_ref()
-        .is_ok_and(|manager| manager.register(HotKey::new(None, Code::F9)).is_ok());
-    let hotkey_proxy = event_proxy.clone();
-    GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
-        if event.state == HotKeyState::Pressed {
-            let _ = hotkey_proxy.send_event(Message::Hotkey);
-        }
-    }));
     let ipc_proxy = event_proxy.clone();
     let data = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
@@ -417,9 +420,19 @@ pub fn run() -> Result<()> {
         .with_url(format!("{ORIGIN}/"))
         .build(&window)?;
 
+    let hotkey_proxy = event_proxy.clone();
+    let registered = crate::hotkey::listen(move || {
+        let _ = hotkey_proxy.send_event(Message::Hotkey);
+    });
     let mut replay: Option<Replay> = None;
-    let audio = Arc::new(Mutex::new(audio::Settings::default()));
+    let mixer_path = MixerCache::path();
+    let loaded_mixer = MixerCache::load(&mixer_path);
+    let restore_settings = loaded_mixer.is_some();
+    let mut mixer = loaded_mixer.unwrap_or_default();
+    let mut persist_at = None;
+    let audio = Arc::new(Mutex::new(mixer.settings.clone()));
     let mut next_audio_scan = Instant::now();
+    let mut ui_ready = false;
     let mut scanning = false;
     let mut saving = false;
     let mut queued_save = None;
@@ -436,7 +449,7 @@ pub fn run() -> Result<()> {
         window.is_maximized(),
     );
     event_loop.run(move |event, _, flow| {
-        let _resources = (&hotkey, &tray);
+        let _tray = &tray;
         *flow = ControlFlow::WaitUntil(next_poll);
         match event {
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. }
@@ -464,6 +477,9 @@ pub fn run() -> Result<()> {
             }
             Event::UserEvent(Message::Exit) => {
                 exiting = true;
+                if persist_at.take().is_some() {
+                    let _ = mixer.save(&mixer_path);
+                }
                 pending_profile = None;
                 if let Some(previous) = replay.take() {
                     previous.pause();
@@ -477,9 +493,14 @@ pub fn run() -> Result<()> {
                 if !retiring && !saving { *flow = ControlFlow::Exit; }
             }
             Event::UserEvent(Message::Ui(Command::Ready)) => {
+                update(&web, "ready", json!({"startup": startup_value(), "version": env!("CARGO_PKG_VERSION"), "hotkey": registered,
+                    "mixer": &mixer, "restoreSettings": restore_settings}));
                 send_sources(&web);
-                update(&web, "ready", json!({"startup": startup_value(), "version": env!("CARGO_PKG_VERSION"), "hotkey": registered}));
                 window.set_visible(true);
+                ui_ready = true;
+                if !restore_settings {
+                    persist_at = Some(Instant::now() + Duration::from_millis(500));
+                }
             }
             Event::UserEvent(Message::Ui(Command::Sources)) => send_sources(&web),
             Event::UserEvent(Message::Ui(Command::Drag)) => {
@@ -492,12 +513,21 @@ pub fn run() -> Result<()> {
             }
             Event::UserEvent(Message::Ui(Command::AudioSources)) => next_audio_scan = Instant::now(),
             Event::UserEvent(Message::Ui(Command::Audio { settings })) => {
-                *audio.lock().unwrap() = settings;
+                if mixer.settings != settings {
+                    *audio.lock().unwrap() = settings.clone();
+                    mixer.settings = settings;
+                    persist_at = Some(Instant::now() + Duration::from_millis(350));
+                }
             }
             Event::UserEvent(Message::AudioSources(result)) => {
                 scanning = false;
                 match result {
-                    Ok(catalog) => update(&web, "audioSources", catalog),
+                    Ok(catalog) => {
+                        if mixer.add_apps(catalog.apps.iter().map(|app| app.source.clone())) {
+                            persist_at = Some(Instant::now() + Duration::from_millis(350));
+                        }
+                        update(&web, "audioSources", catalog);
+                    }
                     Err(error) => update(&web, "audioError", error),
                 }
             }
@@ -569,7 +599,10 @@ pub fn run() -> Result<()> {
             Event::UserEvent(Message::Saved(result)) => {
                 saving = false;
                 let message = match result {
-                    Ok(path) => format!("Clip guardado en {}", path.display()),
+                    Ok(path) => {
+                        play_clip_saved();
+                        format!("Clip guardado en {}", path.display())
+                    }
                     Err(error) => format!("No se pudo guardar el clip. {error}"),
                 };
                 update(&web, "notice", message);
@@ -583,6 +616,12 @@ pub fn run() -> Result<()> {
             Event::NewEvents(StartCause::ResumeTimeReached { .. }) | Event::MainEventsCleared if Instant::now() >= next_poll => {
                 next_poll=Instant::now()+Duration::from_millis(350);
                 *flow=ControlFlow::WaitUntil(next_poll);
+                if persist_at.is_some_and(|deadline| Instant::now() >= deadline) {
+                    persist_at = None;
+                    if let Err(error) = mixer.save(&mixer_path) {
+                        update(&web, "notice", format!("No se pudo guardar la configuración del mezclador. {error}"));
+                    }
+                }
                 if instance.take_open_request() {
                     window.set_visible(true);
                     window.set_minimized(false);
@@ -596,7 +635,7 @@ pub fn run() -> Result<()> {
                     update(&web, "audioNotices", capture.audio_notices());
                 }
                 update(&web, "levels", replay.as_ref().filter(|_| active).map(Replay::levels).unwrap_or_default());
-                if !scanning && Instant::now() >= next_audio_scan {
+                if ui_ready && !exiting && !scanning && Instant::now() >= next_audio_scan {
                     next_audio_scan = Instant::now() + Duration::from_secs(2);
                     scanning = true;
                     let proxy = event_proxy.clone();

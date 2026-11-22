@@ -24,7 +24,7 @@ use windows_capture::{
     monitor::Monitor,
 };
 
-use crate::{audio::Clock, replay::Result};
+use crate::{audio::Clock, cursor::Cursor, replay::Result};
 
 pub enum Capture {
     Monitor(Box<DxgiDuplicationApi>),
@@ -32,7 +32,7 @@ pub enum Capture {
 }
 
 impl Capture {
-    pub fn open(target: CaptureTarget) -> Result<Self> {
+    pub fn open(target: CaptureTarget, include_cursor: bool) -> Result<Self> {
         match target {
             CaptureTarget::Monitor(index) => {
                 let monitor = Monitor::enumerate()?
@@ -43,6 +43,7 @@ impl Capture {
             }
             CaptureTarget::Window(handle) => Ok(Self::Window(Box::new(WindowCapture::open(
                 HWND(handle as *mut _),
+                include_cursor,
             )?))),
         }
     }
@@ -57,16 +58,22 @@ impl Capture {
     pub fn with_frame(
         &mut self,
         clock: &Clock,
+        cursor: Option<&mut Cursor>,
         run: impl FnOnce(&CapturedFrame) -> Result<()>,
     ) -> Result<()> {
         match self {
             Self::Monitor(screen) => match screen.acquire_next_frame(0) {
-                Ok(frame) => run(&CapturedFrame {
-                    texture: frame.texture().clone(),
-                    width: frame.width(),
-                    height: frame.height(),
-                    timestamp: clock.counter_time(frame.frame_info().LastPresentTime)?,
-                }),
+                Ok(frame) => {
+                    if let Some(cursor) = cursor {
+                        cursor.update(&frame)?;
+                    }
+                    run(&CapturedFrame {
+                        texture: frame.texture().clone(),
+                        width: frame.width(),
+                        height: frame.height(),
+                        timestamp: clock.counter_time(frame.frame_info().LastPresentTime)?,
+                    })
+                }
                 Err(Error::Timeout) => Ok(()),
                 Err(error) => Err(error.into()),
             },
@@ -87,7 +94,7 @@ pub struct WindowCapture {
 }
 
 impl WindowCapture {
-    fn open(hwnd: HWND) -> Result<Self> {
+    fn open(hwnd: HWND, include_cursor: bool) -> Result<Self> {
         let (device, _) = d3d11::create_d3d_device()?;
         let winrt = d3d11::create_direct3d_device(&device)?;
         let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
@@ -100,6 +107,7 @@ impl WindowCapture {
             size,
         )?;
         let session = pool.CreateCaptureSession(&item)?;
+        session.SetIsCursorCaptureEnabled(include_cursor)?;
         if let Err(error) = session.SetIsBorderRequired(false) {
             let _ = pool.Close();
             return Err(format!(

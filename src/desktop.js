@@ -9,6 +9,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const version = $('.version-line b');
   const game = $('#game');
   const monitor = $('#monitor');
+  const cursor = $('#capture-cursor');
+  cursor.checked = saved('captureCursor') === 'true';
   let active = false;
   let hotkeyRegistered = true;
   const source = () => option('mode') === 'Monitor completo' ? monitor : game;
@@ -19,6 +21,7 @@ document.addEventListener('DOMContentLoaded', () => {
     fps: +option('fps'),
     bitrate: +option('rate'),
     seconds: +option('seconds'),
+    cursor: cursor.checked,
   });
   const windowBar=document.createElement('div');
   windowBar.className='window-bar';
@@ -54,6 +57,11 @@ document.addEventListener('DOMContentLoaded', () => {
     send('start',{profile:settings});
     start.textContent='Preparando replay…';
   }
+  cursor.addEventListener('change',()=>{
+    remember('captureCursor',String(cursor.checked));
+    clearTimeout(profileTimer);
+    setCaptureProfile();
+  });
   function refreshCaptureChoices(){
     if(!active && !paused && !source().value) send('sources');
   }
@@ -100,7 +108,7 @@ document.addEventListener('DOMContentLoaded', () => {
   modePicker.addEventListener('change', changeSource);
   $('#save').onclick = () => send('save');
   document.addEventListener('keydown', event => {
-    if (event.key !== 'F9') return;
+    if (event.key !== 'F9' || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
     event.stopImmediatePropagation();
     event.preventDefault();
     if (!hotkeyRegistered && !event.repeat) send('save');
@@ -125,13 +133,12 @@ document.addEventListener('DOMContentLoaded', () => {
     return {
       device:microphone.value,
       mono:$('#mic-mono').checked,
-      voice:$('#mic-voice').checked,
+      noise_suppression:$('#mic-noise-suppression').checked,
       tracks:Object.fromEntries([...tracks].map(([id,t])=>[id,{include:t.include.checked,volume:+t.gain.value}]))
     };
   }
   function syncAudio(){
     const settings=audioSettings();
-    remember('desktopAudio',JSON.stringify(settings));
     send('audio',{settings});
   }
   let preferences={};
@@ -154,16 +161,36 @@ document.addEventListener('DOMContentLoaded', () => {
     syncTrack(track);
     updateCount();
   }
+  function addApplication(source){
+    if(tracks.has(source.id)) return;
+    const executable=source.label.toLowerCase();
+    if(executable==='discord') addNativeTrack(source.id,'Discord','#aab4ff','discord-logo');
+    else if(executable==='spotify') addNativeTrack(source.id,'Spotify','#87dbaa','spotify-logo');
+    else addNativeTrack(source.id,source.label,colors[nextColor++ % colors.length],'waveform');
+  }
+  function applyAudioPreferences(){
+    const mic=tracks.get('mic');
+    mic.include.checked=preferences.tracks?.mic?.include ?? true;
+    mic.gain.value=preferences.tracks?.mic?.volume ?? 100;
+    mute.checked=!mic.include.checked;
+    globalGain.value=mic.gain.value;
+    showGain(globalGain);
+    drawScale();
+    syncTrack(mic);
+    updateCount();
+    $('#mic-mono').checked=preferences.mono ?? true;
+    $('#mic-noise-suppression').checked=preferences.noise_suppression ?? true;
+    microphone.replaceChildren(new Option('Micrófono predeterminado',''));
+    if(preferences.device) microphone.add(new Option(preferences.device,preferences.device,true,true));
+  }
   addNativeTrack('mic','Micrófono',getComputedStyle(app).getPropertyValue('--mic-tint').trim(),'microphone');
-  if (typeof preferences.mono==='boolean') $('#mic-mono').checked=preferences.mono;
-  if (typeof preferences.voice==='boolean') $('#mic-voice').checked=preferences.voice;
   $('#refresh').onclick=()=>send('audio_sources');
   $('#tracks').addEventListener('input',syncAudio);
   $('#tracks').addEventListener('change',syncAudio);
   $('#global-volume').addEventListener('input',syncAudio);
   $('#mic-mute').addEventListener('change',syncAudio);
   $('#mic-mono').addEventListener('change',syncAudio);
-  $('#mic-voice').addEventListener('change',syncAudio);
+  $('#mic-noise-suppression').addEventListener('change',syncAudio);
   microphone.addEventListener('change',syncAudio);
 
   function fill(select, values, placeholder, preferred) {
@@ -181,6 +208,10 @@ document.addEventListener('DOMContentLoaded', () => {
       $('#startup').checked = info.startup;
       hotkeyRegistered = info.hotkey;
       if (!info.hotkey) $('#save').title = 'F9 disponible con Cut en primer plano';
+      if(info.restoreSettings) preferences=info.mixer.settings;
+      applyAudioPreferences();
+      for(const source of info.mixer.apps) addApplication(source);
+      syncAudio();
     },
     sources(list) {
       fill(game,list.windows,'Elige una ventana',saved('captureWindow'));
@@ -189,19 +220,19 @@ document.addEventListener('DOMContentLoaded', () => {
       if(!active && !paused && !source().value) start.textContent='Elige una ventana';
     },
     audioSources(catalog) {
-      const devices=[new Option('Micrófono predeterminado',''),...catalog.devices.map(d=>new Option(d.label,d.id))];
-      const before=microphone.dataset.loaded ? microphone.value : preferences.device;
+      const label=catalog.default_microphone ? 'Predeterminado · '+catalog.default_microphone : 'Micrófono predeterminado';
+      const devices=[new Option(label,''),...catalog.devices.map(d=>new Option(d.label,d.id))];
+      const before=microphone.value;
+      if(before && !devices.some(device=>device.value===before)){
+        devices.push(new Option('Micrófono no conectado',before));
+      }
       microphone.replaceChildren(...devices);
       if (devices.some(device=>device.value===before)) microphone.value=before;
-      microphone.dataset.loaded='true';
-      for(const source of catalog.apps){
-        if(tracks.has(source.id)) continue;
-        const executable=source.label.toLowerCase();
-        if(executable==='discord') addNativeTrack(source.id,'Discord','#aab4ff','discord-logo');
-        else if(executable==='spotify') addNativeTrack(source.id,'Spotify','#87dbaa','spotify-logo');
-        else addNativeTrack(source.id,source.label,colors[nextColor++ % colors.length],'waveform');
+      for(const source of catalog.apps) addApplication(source);
+      const live=new Set(catalog.apps.map(source=>source.id));
+      for(const [id,track] of tracks){
+        if(id!=='mic') track.row.classList.toggle('audio-idle',!live.has(id));
       }
-      syncAudio();
     },
     audioNotices(notices) {
       for(const [id, track] of tracks) {
@@ -230,9 +261,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   };
   document.documentElement.classList.add('desktop');
-  microphone.replaceChildren(new Option('Micrófono predeterminado',''));
-  if(preferences.device) microphone.add(new Option(preferences.device,preferences.device,true,true));
-  syncAudio();
   send('ready');
   missingSourceTimer=setInterval(refreshCaptureChoices,3500);
   window.addEventListener('pagehide',()=>clearInterval(missingSourceTimer),{once:true});

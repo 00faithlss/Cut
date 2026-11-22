@@ -13,6 +13,7 @@ const DELAY_FRAMES: u64 = RATE / 16;
 const FRAME_NS: u128 = 1_000_000_000;
 
 pub struct Mix {
+    channels: u16,
     encoder: AacEncoder,
     pending: BTreeMap<u64, Box<[i32; FRAMES * 2]>>,
     rendered_until: u64,
@@ -23,18 +24,23 @@ fn samples_at(time: Duration) -> u64 {
 }
 
 impl Mix {
-    pub fn new() -> Result<Self> {
+    pub fn new(channels: u16) -> Result<Self> {
         Ok(Self {
-            encoder: AacEncoder::new(RATE as u32, 2, 128_000)?,
+            channels,
+            encoder: AacEncoder::new(
+                RATE as u32,
+                channels,
+                if channels == 1 { 96_000 } else { 128_000 },
+            )?,
             pending: BTreeMap::new(),
             rendered_until: 0,
         })
     }
 
-    pub fn new_history(&self) -> History {
+    pub fn new_history(&self, name: &str) -> History {
         History {
-            name: "Mezcla".into(),
-            channels: 2,
+            name: name.into(),
+            channels: self.channels,
             packets: VecDeque::new(),
             level: 0.0,
         }
@@ -60,9 +66,11 @@ impl Mix {
                     } else {
                         i16::from_le_bytes([frame[2], frame[3]])
                     };
-                    let at = (offset + n) * 2;
+                    let at = (offset + n) * usize::from(self.channels);
                     pcm[at] = pcm[at].saturating_add(i32::from(left));
-                    pcm[at + 1] = pcm[at + 1].saturating_add(i32::from(right));
+                    if self.channels == 2 {
+                        pcm[at + 1] = pcm[at + 1].saturating_add(i32::from(right));
+                    }
                 }
             }
             sample += count as u64;
@@ -72,6 +80,8 @@ impl Mix {
 
     pub fn render(&mut self, time: Duration, history: &mut History) -> Result<()> {
         let ready = samples_at(time).saturating_sub(DELAY_FRAMES) / FRAMES as u64;
+        let mut peak = 0;
+        let samples = FRAMES * usize::from(self.channels);
         while self
             .pending
             .first_key_value()
@@ -80,15 +90,18 @@ impl Mix {
             let (index, block) = self.pending.pop_first().unwrap();
             self.rendered_until = index + 1;
             let mut pcm = [0; FRAMES * 4];
-            for (i, sample) in block.iter().enumerate() {
+            for (i, sample) in block[..samples].iter().enumerate() {
                 let value = (*sample).clamp(i32::from(i16::MIN), i32::from(i16::MAX));
+                peak = peak.max(value.unsigned_abs());
                 pcm[i * 2..i * 2 + 2].copy_from_slice(&(value as i16).to_le_bytes());
             }
             let timestamp = Duration::from_nanos(index * FRAMES as u64 * 1_000_000_000 / RATE);
             let mut output = Vec::new();
-            self.encoder.encode(&pcm, timestamp, &mut output)?;
+            self.encoder
+                .encode(&pcm[..samples * 2], timestamp, &mut output)?;
             history.packets.extend(output.into_iter().map(Arc::new));
         }
+        history.level = (history.level * 0.9).max(f64::from(peak) / 32768.0);
         Ok(())
     }
 }

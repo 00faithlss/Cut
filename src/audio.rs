@@ -10,10 +10,10 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use wasapi::{
-    AudioCaptureClient, AudioClient, AudioClientProperties, DeviceEnumerator, Direction, Handle,
-    SampleType, SessionState, StreamCategory, StreamMode, WaveFormat,
+    AudioCaptureClient, AudioClient, DeviceEnumerator, Direction, Handle, SampleType, SessionState,
+    StreamMode, WaveFormat,
 };
-use win_native_media::audio::{EncodedAudio, aac::AacEncoder};
+use win_native_media::audio::EncodedAudio;
 use windows::Win32::{
     Foundation::CloseHandle,
     System::{
@@ -25,17 +25,17 @@ use windows::Win32::{
     },
 };
 
-use crate::mix::Mix;
 use crate::replay::Result;
+use crate::{microphone::Microphone, mix::Mix};
 
 const RATE: u32 = 48_000;
-const AAC_FRAMES: usize = 1024;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct Settings {
     pub device: String,
     pub mono: bool,
-    pub voice: bool,
+    pub noise_suppression: bool,
     pub tracks: HashMap<String, Gain>,
 }
 
@@ -44,28 +44,37 @@ impl Default for Settings {
         Self {
             device: String::new(),
             mono: true,
-            voice: true,
+            noise_suppression: true,
             tracks: HashMap::new(),
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Gain {
     pub include: bool,
     pub volume: u16,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Source {
     pub id: String,
     pub label: String,
 }
 
+#[derive(Serialize)]
+pub struct Application {
+    #[serde(flatten)]
+    pub source: Source,
+    #[serde(skip)]
+    pids: Vec<u32>,
+}
+
 #[derive(Default, Serialize)]
 pub struct Catalog {
     pub devices: Vec<Source>,
-    pub apps: Vec<Source>,
+    pub apps: Vec<Application>,
+    pub default_microphone: Option<String>,
 }
 
 fn processes() -> HashMap<u32, (u32, String)> {
@@ -105,7 +114,13 @@ fn processes() -> HashMap<u32, (u32, String)> {
 
 pub fn discover() -> Result<Catalog> {
     let enumerator = DeviceEnumerator::new()?;
-    let mut found = Catalog::default();
+    let mut found = Catalog {
+        default_microphone: enumerator
+            .get_default_device(Direction::Capture)
+            .and_then(|device| device.get_friendlyname())
+            .ok(),
+        ..Catalog::default()
+    };
     if let Ok(devices) = enumerator.get_device_collection(Direction::Capture) {
         for device in (&devices).into_iter().flatten() {
             if let (Ok(id), Ok(label)) = (device.get_id(), device.get_friendlyname()) {
@@ -133,30 +148,55 @@ pub fn discover() -> Result<Catalog> {
             }
         }
     }
-    let process = processes();
-    for &pid in &pids {
-        let Some(&(mut parent, ref label)) = process.get(&pid) else {
+    found.apps = group_processes(&processes(), pids, std::process::id());
+    Ok(found)
+}
+
+fn group_processes(
+    processes: &HashMap<u32, (u32, String)>,
+    pids: HashSet<u32>,
+    own_pid: u32,
+) -> Vec<Application> {
+    let mut applications: HashMap<String, Application> = HashMap::new();
+    let mut pids: Vec<_> = pids.into_iter().collect();
+    pids.sort_unstable();
+    for pid in pids {
+        let Some((_, label)) = processes.get(&pid) else {
             continue;
         };
+        let id = format!("app:{}", label.to_lowercase());
+        let mut root = pid;
+        let mut current = pid;
         let mut visited = HashSet::new();
-        while !pids.contains(&parent) && visited.insert(parent) {
-            let Some(entry) = process.get(&parent) else {
+        while visited.insert(current) {
+            let Some((parent, name)) = processes.get(&current) else {
                 break;
             };
-            parent = entry.0;
+            if name.eq_ignore_ascii_case(label) {
+                root = current;
+            }
+            current = *parent;
         }
-        if parent != pid && pids.contains(&parent) {
+        // El WebView y los auxiliares de Cut pertenecen al árbol de la app.
+        if visited.contains(&own_pid) {
             continue;
         }
-        found.apps.push(Source {
-            id: pid.to_string(),
-            label: label.clone(),
-        });
+        let app = applications
+            .entry(id.clone())
+            .or_insert_with(|| Application {
+                source: Source {
+                    id,
+                    label: label.clone(),
+                },
+                pids: Vec::new(),
+            });
+        if !app.pids.contains(&root) {
+            app.pids.push(root);
+        }
     }
-    found
-        .apps
-        .sort_by(|a, b| a.label.cmp(&b.label).then(a.id.cmp(&b.id)));
-    Ok(found)
+    let mut apps: Vec<_> = applications.into_values().collect();
+    apps.sort_by(|a, b| a.source.id.cmp(&b.source.id));
+    apps
 }
 
 #[derive(Clone)]
@@ -217,19 +257,15 @@ struct Input {
     _client: AudioClient,
     capture: AudioCaptureClient,
     _event: Handle,
-    encoder: AacEncoder,
     channels: u16,
     input_channels: u16,
-    voice: Option<[Voice; 2]>,
+    microphone: Option<Box<Microphone>>,
     staging: Vec<u8>,
     pcm: Vec<u8>,
-    start: Duration,
-    samples: Vec<EncodedAudio>,
-    peak: f64,
 }
 
 impl Input {
-    fn new(pid: Option<u32>, device: &str, mono: bool, voice: bool) -> Result<Self> {
+    fn new(pid: Option<u32>, device: &str, mono: bool) -> Result<Self> {
         let mut client = if let Some(pid) = pid {
             AudioClient::new_application_loopback_client(pid, true)?
         } else {
@@ -241,10 +277,6 @@ impl Input {
             };
             source.get_iaudioclient()?
         };
-        if voice {
-            let _ = client
-                .set_properties(AudioClientProperties::new().set_category(StreamCategory::Speech));
-        }
         let input_channels = if pid.is_none()
             && client
                 .get_mixformat()
@@ -254,11 +286,16 @@ impl Input {
         } else {
             2
         };
-        let channels = if mono { 1 } else { 2 };
+        let channels = if mono { 1 } else { input_channels };
+        let (bits, sample) = if pid.is_none() {
+            (32, SampleType::Float)
+        } else {
+            (16, SampleType::Int)
+        };
         let format = WaveFormat::new(
-            16,
-            16,
-            SampleType::Int,
+            bits,
+            bits,
+            sample,
             RATE as usize,
             input_channels as usize,
             None,
@@ -274,31 +311,32 @@ impl Input {
         )?;
         let event = client.set_get_eventhandle()?;
         let capture = client.get_audiocaptureclient()?;
-        let encoder = AacEncoder::new(RATE, channels, if mono { 96_000 } else { 128_000 })?;
         client.start_stream()?;
         Ok(Self {
             _client: client,
             capture,
             _event: event,
-            encoder,
             channels,
             input_channels,
-            voice: voice.then(|| [Voice::default(), Voice::default()]),
+            microphone: pid.is_none().then(|| Box::new(Microphone::new(channels))),
             staging: Vec::new(),
             pcm: Vec::new(),
-            start: Duration::ZERO,
-            samples: Vec::new(),
-            peak: 0.0,
         })
     }
 
-    fn read(&mut self, clock: &Clock, gain: u16, mix: &mut Mix) -> Result<()> {
-        let mut peak = 0;
+    fn read(
+        &mut self,
+        clock: &Clock,
+        gain: u16,
+        suppress: bool,
+        mut output: impl FnMut(Duration, &[u8], u16),
+    ) -> Result<()> {
         while let Some(size) = self.capture.get_next_packet_size()? {
             if size == 0 {
                 break;
             }
-            let input_width = usize::from(self.input_channels) * 2;
+            let input_width =
+                usize::from(self.input_channels) * if self.microphone.is_some() { 4 } else { 2 };
             self.staging.resize(size as usize * input_width, 0);
             let (frames, info) = self.capture.read_from_device(&mut self.staging)?;
             if frames == 0 {
@@ -306,6 +344,9 @@ impl Input {
             }
             if info.flags.data_discontinuity {
                 self.pcm.clear();
+                if let Some(mic) = &mut self.microphone {
+                    **mic = Microphone::new(self.channels);
+                }
             }
             let packet_time = if info.flags.timestamp_error || info.timestamp == 0 {
                 clock
@@ -314,99 +355,57 @@ impl Input {
             } else {
                 clock.relative(info.timestamp)
             };
-            if self.pcm.is_empty() {
-                self.start = packet_time;
-            }
-            let amplify = |sample: i32| {
-                (sample * i32::from(gain.min(200)) / 100)
-                    .clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
-            };
-            let packet_start = self.pcm.len();
-            for frame in self.staging[..frames as usize * input_width].chunks_exact(input_width) {
-                let left = i32::from(i16::from_le_bytes([frame[0], frame[1]]));
-                let right = if self.input_channels == 1 {
-                    left
-                } else {
-                    i32::from(i16::from_le_bytes([frame[2], frame[3]]))
+            self.pcm.clear();
+            let input = &self.staging[..frames as usize * input_width];
+            let start = if let Some(mic) = &mut self.microphone {
+                let Some(start) = mic.process(
+                    input,
+                    self.input_channels,
+                    packet_time,
+                    gain,
+                    suppress,
+                    &mut self.pcm,
+                ) else {
+                    continue;
                 };
-                if self.channels == 1 {
-                    let center = if left.abs() > 2 * right.abs() {
-                        left
-                    } else if right.abs() > 2 * left.abs() {
-                        right
-                    } else if left == 0 || right == 0 {
-                        left + right
-                    } else {
-                        (left + right) / 2
-                    };
-                    let center = amplify(
-                        self.voice
-                            .as_mut()
-                            .map_or(center, |filters| filters[0].process(center)),
-                    );
-                    peak = peak.max(center.unsigned_abs());
-                    self.pcm.extend_from_slice(&center.to_le_bytes());
-                } else {
-                    let (left, right) = if let Some(filters) = &mut self.voice {
-                        (filters[0].process(left), filters[1].process(right))
-                    } else {
-                        (left, right)
-                    };
-                    let (left, right) = (amplify(left), amplify(right));
-                    peak = peak.max(left.unsigned_abs()).max(right.unsigned_abs());
-                    self.pcm.extend_from_slice(&left.to_le_bytes());
-                    self.pcm.extend_from_slice(&right.to_le_bytes());
-                }
-            }
-            mix.add(packet_time, &self.pcm[packet_start..], self.channels);
-            let chunk = AAC_FRAMES * usize::from(self.channels) * 2;
-            let mut consumed = 0;
-            while self.pcm.len() - consumed >= chunk {
-                self.encoder.encode(
-                    &self.pcm[consumed..consumed + chunk],
-                    self.start,
-                    &mut self.samples,
-                )?;
-                self.start +=
-                    Duration::from_nanos(AAC_FRAMES as u64 * 1_000_000_000 / u64::from(RATE));
-                consumed += chunk;
-            }
-            self.pcm.drain(..consumed);
-        }
-        self.peak = (self.peak * 0.91).max(f64::from(peak) / 32768.0);
-        Ok(())
-    }
-}
-
-#[derive(Default)]
-struct Voice {
-    previous: f32,
-    high_pass: f32,
-    low_pass: f32,
-    envelope: f32,
-}
-
-impl Voice {
-    fn process(&mut self, sample: i32) -> i32 {
-        let sample = sample as f32;
-        self.high_pass = 0.988 * (self.high_pass + sample - self.previous);
-        self.previous = sample;
-        self.low_pass += 0.63 * (self.high_pass - self.low_pass);
-        self.envelope += (self.low_pass.abs() - self.envelope)
-            * if self.low_pass.abs() > self.envelope {
-                0.005
+                start
             } else {
-                0.00025
+                for bytes in input.as_chunks::<2>().0 {
+                    let sample = i32::from(i16::from_le_bytes(*bytes));
+                    let sample = (sample * i32::from(gain.min(200)) / 100)
+                        .clamp(i32::from(i16::MIN), i32::from(i16::MAX))
+                        as i16;
+                    self.pcm.extend_from_slice(&sample.to_le_bytes());
+                }
+                packet_time
             };
-        let gate = ((self.envelope - 75.0) / 225.0).clamp(0.0, 1.0);
-        let boost = 2.55 / (1.0 + self.envelope / 12_000.0);
-        (self.low_pass * (0.10 + 0.90 * gate) * boost) as i32
+            output(start, &self.pcm, self.channels);
+        }
+        Ok(())
     }
 }
 
 impl Drop for Input {
     fn drop(&mut self) {
         let _ = self._client.stop_stream();
+    }
+}
+
+struct Group {
+    inputs: HashMap<u32, Input>,
+    mix: Mix,
+    output: History,
+}
+
+impl Group {
+    fn new(label: &str, pid: u32, input: Input) -> Result<Self> {
+        let mix = Mix::new(input.channels)?;
+        let output = mix.new_history(label);
+        Ok(Self {
+            inputs: HashMap::from([(pid, input)]),
+            mix,
+            output,
+        })
     }
 }
 
@@ -419,130 +418,200 @@ pub fn run(
     notices: &Notices,
 ) -> Result<()> {
     wasapi::initialize_mta().ok()?;
-    let mut inputs = HashMap::<String, Input>::new();
-    let mut sources = HashMap::<String, String>::new();
+    let mut groups = HashMap::<String, Group>::new();
+    let mut sources = Vec::new();
     let mut discover_at = Instant::now();
-    let mut device = String::new();
-    let mut mono = false;
-    let mut voice = false;
-    let mut mix = Mix::new()?;
-    let mut mixed = mix.new_history();
+    let mut previous = Settings::default();
+    let mut mix = Mix::new(2)?;
+    let mut mixed = mix.new_history("Mezcla");
     let mut mixed_sources = HashSet::new();
     while !stop.load(Ordering::Relaxed) {
         let preferences = settings.lock().unwrap().clone();
-        if preferences.device != device || preferences.mono != mono || preferences.voice != voice {
-            inputs.remove("mic");
+        if preferences.device != previous.device || preferences.mono != previous.mono {
+            groups.remove("mic");
             history.lock().unwrap().remove("mic");
             notices.lock().unwrap().remove("mic");
-            device.clone_from(&preferences.device);
-            mono = preferences.mono;
-            voice = preferences.voice;
         }
-        let mut discovery = false;
-        if Instant::now() >= discover_at {
+        let discovery = Instant::now() >= discover_at;
+        if discovery {
             discover_at = Instant::now() + Duration::from_secs(2);
-            discovery = true;
             if let Ok(catalog) = discover() {
-                sources.extend(
-                    catalog
-                        .apps
-                        .into_iter()
-                        .map(|source| (source.id, source.label)),
-                );
-                let running = processes();
-                sources.retain(|id, _| {
-                    id.parse()
-                        .ok()
-                        .is_some_and(|pid| running.contains_key(&pid))
-                });
-                inputs.retain(|id, _| id == "mic" || sources.contains_key(id));
+                sources = catalog.apps;
             }
-            sources.insert("mic".into(), "Micrófono".into());
+            if !sources
+                .iter()
+                .any(|app: &Application| app.source.id == "mic")
+            {
+                sources.push(Application {
+                    source: Source {
+                        id: "mic".into(),
+                        label: "Micrófono".into(),
+                    },
+                    pids: vec![0],
+                });
+            }
         }
         let cutoff = clock.now()?.saturating_sub(retain + Duration::from_secs(3));
         {
             let mut all = history.lock().unwrap();
             all.retain(|id, track| {
-                track.packets.retain(|packet| packet.timestamp >= cutoff);
+                if id != "mix" && !sources.iter().any(|app| &app.source.id == id) {
+                    track.level = 0.0;
+                }
+                while track
+                    .packets
+                    .front()
+                    .is_some_and(|packet| packet.timestamp < cutoff)
+                {
+                    track.packets.pop_front();
+                }
                 preferences.tracks.get(id).is_none_or(|gain| gain.include)
-                    && (id == "mix" || sources.contains_key(id) || !track.packets.is_empty())
+                    && (id == "mix" || groups.contains_key(id) || !track.packets.is_empty())
             });
         }
-        // Al excluir una pista también se descarta su contribución a la mezcla anterior.
+        groups.retain(|id, _| {
+            sources.iter().any(|app| &app.source.id == id)
+                && preferences.tracks.get(id).is_none_or(|gain| gain.include)
+        });
         if mixed_sources
             .iter()
             .any(|id| preferences.tracks.get(id).is_some_and(|gain| !gain.include))
         {
             mixed_sources.clear();
             mixed.packets.clear();
-            mix = Mix::new()?;
+            mix = Mix::new(2)?;
             history.lock().unwrap().remove("mix");
         }
-        for (id, label) in &sources {
+        for app in &sources {
+            let Source { id, label } = &app.source;
             let gain = preferences.tracks.get(id).copied().unwrap_or(Gain {
                 include: true,
                 volume: 100,
             });
             if !gain.include {
-                inputs.remove(id);
                 notices.lock().unwrap().remove(id);
                 continue;
             }
-            if !inputs.contains_key(id) {
-                if !discovery && notices.lock().unwrap().contains_key(id) {
-                    continue;
+            let is_mic = id == "mic";
+            if discovery
+                || !previous.tracks.get(id).is_none_or(|gain| gain.include)
+                || (is_mic
+                    && (preferences.device != previous.device || preferences.mono != previous.mono))
+            {
+                if let Some(group) = groups.get_mut(id) {
+                    group.inputs.retain(|pid, _| app.pids.contains(pid));
                 }
-                match Input::new(
-                    id.parse().ok(),
-                    &device,
-                    id == "mic" && mono,
-                    id == "mic" && voice,
-                ) {
-                    Ok(input) => {
-                        notices.lock().unwrap().remove(id);
-                        let mut all = history.lock().unwrap();
-                        all.entry(id.clone()).or_insert_with(|| History {
-                            name: label.clone(),
-                            channels: input.channels,
-                            packets: VecDeque::new(),
-                            level: 0.0,
-                        });
-                        inputs.insert(id.clone(), input);
-                    }
-                    Err(error) => {
-                        notices
-                            .lock()
-                            .unwrap()
-                            .insert(id.clone(), error.to_string());
+                let mut last_error = None;
+                for &pid in &app.pids {
+                    if groups
+                        .get(id)
+                        .is_some_and(|group| group.inputs.contains_key(&pid))
+                    {
                         continue;
                     }
+                    let input = match Input::new(
+                        (pid != 0).then_some(pid),
+                        &preferences.device,
+                        is_mic && preferences.mono,
+                    ) {
+                        Ok(input) => input,
+                        Err(error) => {
+                            last_error = Some(error.to_string());
+                            continue;
+                        }
+                    };
+                    if let Some(group) = groups.get_mut(id) {
+                        group.inputs.insert(pid, input);
+                    } else {
+                        groups.insert(id.clone(), Group::new(label, pid, input)?);
+                    }
+                }
+                let mut current = notices.lock().unwrap();
+                if groups.get(id).is_some_and(|group| !group.inputs.is_empty()) {
+                    current.remove(id);
+                } else if let Some(error) = last_error {
+                    current.insert(id.clone(), error);
                 }
             }
-            let input = inputs.get_mut(id).unwrap();
-            if let Err(error) = input.read(clock, gain.volume, &mut mix) {
-                notices
-                    .lock()
-                    .unwrap()
-                    .insert(id.clone(), error.to_string());
-                inputs.remove(id);
+            let Some(group) = groups.get_mut(id) else {
                 continue;
+            };
+            let mut last_error = None;
+            group.inputs.retain(|_, input| {
+                match input.read(
+                    clock,
+                    gain.volume,
+                    preferences.noise_suppression,
+                    |time, data, channels| {
+                        group.mix.add(time, data, channels);
+                        mix.add(time, data, channels);
+                        mixed_sources.insert(id.clone());
+                    },
+                ) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        last_error = Some(error.to_string());
+                        false
+                    }
+                }
+            });
+            if group.inputs.is_empty()
+                && let Some(error) = last_error
+            {
+                notices.lock().unwrap().insert(id.clone(), error);
             }
-            mixed_sources.insert(id.clone());
-            if let Some(track) = history.lock().unwrap().get_mut(id) {
-                track.level = input.peak;
-                track.packets.extend(input.samples.drain(..).map(Arc::new));
-            }
+            group.mix.render(clock.now()?, &mut group.output)?;
+            let mut all = history.lock().unwrap();
+            let track = all
+                .entry(id.clone())
+                .or_insert_with(|| group.mix.new_history(label));
+            track.level = group.output.level;
+            track.packets.append(&mut group.output.packets);
         }
         mix.render(clock.now()?, &mut mixed)?;
         if !mixed.packets.is_empty() {
-            let mut tracks = history.lock().unwrap();
-            tracks
+            history
+                .lock()
+                .unwrap()
                 .entry("mix".into())
-                .or_insert_with(|| mix.new_history())
+                .or_insert_with(|| mix.new_history("Mezcla"))
                 .packets
                 .append(&mut mixed.packets);
         }
+        previous = preferences;
         thread::sleep(Duration::from_millis(12));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agrupa_pestanas_e_instancias_y_excluye_los_auxiliares_de_cut() {
+        let processes = HashMap::from([
+            (10, (0, "VLC".into())),
+            (11, (10, "vlc".into())),
+            (12, (0, "vlc".into())),
+            (21, (0, "zen".into())),
+            (22, (21, "zen".into())),
+            (31, (21, "Spotify".into())),
+            (40, (0, "cut".into())),
+            (41, (40, "msedgewebview2".into())),
+        ]);
+        let apps = group_processes(&processes, HashSet::from([11, 12, 22, 31, 41]), 40);
+        let grouped: Vec<_> = apps
+            .iter()
+            .map(|app| (app.source.id.as_str(), app.pids.as_slice()))
+            .collect();
+        assert_eq!(
+            grouped,
+            vec![
+                ("app:spotify", &[31][..]),
+                ("app:vlc", &[10, 12][..]),
+                ("app:zen", &[21][..]),
+            ]
+        );
+    }
 }
