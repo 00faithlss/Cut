@@ -8,35 +8,35 @@
 @font-face{font-family:Inter;src:url("ui-assets/inter.woff2") format("woff2");font-weight:100 900;font-display:swap}
 @font-face{font-family:Plex;src:url("ui-assets/plex-mono.woff2") format("woff2");font-display:swap}
 *{box-sizing:border-box}
-:root{font-family:Inter,"Segoe UI",sans-serif;color:#fff5ec;background:#101320;--muted:#b6bfd2;--accent:#ffba84;--shade:#20283c;--line:#a9b6d336}
-body{margin:0}button,input,select{font:inherit}button,select{background:#303a50e8;color:inherit;border:0;border-radius:9px;padding:9px 12px;font-size:13px}button,select,input{cursor:pointer}button:hover,select:hover{background:#414d66}button:disabled{opacity:.6}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:3px}button:active{transform:translateY(1px)}
-.app{isolation:isolate;position:relative;overflow:hidden;display:grid;grid-template-columns:94px minmax(0,1fr);width:min(1200px,calc(100% - 32px));min-height:635px;margin:16px auto;border-radius:20px;background:#0c1324;box-shadow:0 16px 80px #060b0950}
+:root{font-family:Inter,"Segoe UI",sans-serif;color:#f6f6f6;background:#131313;--muted:#bebebe;--accent:#c5c5c5;--shade:#282828;--line:#b5b5b536}
+body{margin:0}button,input,select{font:inherit}button,select{background:#393939e8;color:inherit;border:0;border-radius:9px;padding:9px 12px;font-size:13px}button,select,input{cursor:pointer}button:hover,select:hover{background:#4c4c4c}button:disabled{opacity:.6}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:3px}button:active{transform:translateY(1px)}
+.app{isolation:isolate;position:relative;overflow:hidden;display:grid;grid-template-columns:94px minmax(0,1fr);width:min(1200px,calc(100% - 32px));min-height:635px;margin:16px auto;border-radius:20px;background:#131313;box-shadow:0 16px 80px #0a0a0a50}
 .pond{position:absolute;inset:0;width:100%;height:100%;z-index:-1;pointer-events:none}
-.rail{display:flex;flex-direction:column;align-items:center;gap:36px;padding:28px 8px 20px;background:linear-gradient(90deg,#1e294899,transparent)}
+.rail{display:flex;flex-direction:column;align-items:center;gap:36px;padding:28px 8px 20px;background:linear-gradient(90deg,#29292999,transparent)}
 .brand{display:inline-flex;align-items:center}
-.tabs{display:grid;width:100%;gap:8px}.tabs button,.rail #motion{display:grid;justify-items:center;gap:6px;background:transparent;color:#b6bfd2;font-size:10px;font-weight:550;padding:10px 0}.tabs button[aria-current]{background:#ffba841c;color:#ffd4ac}.tabs button:hover,.rail #motion:hover{background:#dce5db0c}.rail #motion{margin-top:auto;width:100%}
+.tabs{display:grid;width:100%;gap:8px}.tabs button,.rail #motion{display:grid;justify-items:center;gap:6px;background:transparent;color:#bebebe;font-size:10px;font-weight:550;padding:10px 0}.tabs button[aria-current]{background:#c5c5c51c;color:#dadada}.tabs button:hover,.rail #motion:hover{background:#e2e2e20c}.rail #motion{margin-top:auto;width:100%}
 .icon{width:19px;height:19px;object-fit:contain;filter:invert(91%) sepia(8%) saturate(205%);flex:none}.tabs .icon{width:22px;height:22px}
 .workspace{min-width:0;padding:34px 32px 26px 25px;position:relative}
 #captura{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(230px,.89fr);gap:26px}
 .mixing h1,.settings-panel h2{font-size:31px;font-weight:580;letter-spacing:-.048em;margin:0}
-.mixing>.actions{display:flex;align-items:center;flex-wrap:wrap;gap:9px;margin:12px 0 32px}.source-picker{display:flex;align-items:center;gap:6px;background:#ffffff0d;border-radius:7px;padding:0 8px}.source-picker img{width:15px}.source-picker select{background:transparent;padding:7px 3px;font-size:12px}select option{background:#242d40}
-.profile{font:11px Plex,monospace;color:#b8c1d6}
-#mixer{background:linear-gradient(100deg,#202739f4,#1b2336df);border-radius:18px;padding:17px 18px 15px;box-shadow:0 5px 25px #050c0717}
-.mixer-head,.mix-title,.gain,.track label,.panel-actions,.checks,.device{display:flex;align-items:center}.mixer-head{justify-content:space-between;gap:10px}.mix-title{gap:8px}.mix-title h2{font-size:18px;letter-spacing:-.035em;font-weight:600;margin:0}.count{font:10px Plex,monospace;color:#bcc6bc}
+.mixing>.actions{display:flex;align-items:center;flex-wrap:wrap;gap:9px;margin:12px 0 32px}.source-picker{display:flex;align-items:center;gap:6px;background:#ffffff0d;border-radius:7px;padding:0 8px}.source-picker img{width:15px}.source-picker select{background:transparent;padding:7px 3px;font-size:12px}select option{background:#2c2c2c}
+.profile{font:11px Plex,monospace;color:#c1c1c1}
+#mixer{background:linear-gradient(100deg,#272727f4,#232323df);border-radius:18px;padding:17px 18px 15px;box-shadow:0 5px 25px #0a0a0a17}
+.mixer-head,.mix-title,.gain,.track label,.panel-actions,.checks,.device{display:flex;align-items:center}.mixer-head{justify-content:space-between;gap:10px}.mix-title{gap:8px}.mix-title h2{font-size:18px;letter-spacing:-.035em;font-weight:600;margin:0}.count{font:10px Plex,monospace;color:#c3c3c3}
 #refresh{display:flex;align-items:center;gap:6px;font-size:11px;padding:7px 8px;background:#ffffff09}#refresh img{width:16px;height:16px}#refresh:disabled img{animation:turn .5s ease-in-out infinite}@keyframes turn{to{transform:rotate(360deg)}}
 .columns{display:grid;grid-template-columns:1fr 1fr;margin:20px 1px 0;font-size:10px;color:var(--muted)}.columns span:last-child{text-align:right}
 .track{display:grid;grid-template-columns:minmax(110px,1fr) minmax(116px,1fr);column-gap:14px;row-gap:5px;padding:11px 0 8px;align-items:center}.track label{gap:8px;font-size:14px;font-weight:530}.track label>img{width:22px;height:22px}.track input[type=checkbox]{width:14px;height:14px;margin:0;accent-color:var(--tint)}
 .signal{grid-row:2;grid-column:1/-1;width:100%;height:20px;opacity:.8}.track.off .signal,.track.off .gain{opacity:.42}.gain{gap:10px;grid-column:2;grid-row:1}.gain input,.volume input{width:100%;min-width:0;margin:0;accent-color:var(--tint,var(--accent))}.readout{font:12px Plex,monospace;min-width:37px;text-align:right}
-.replay{display:flex;flex-direction:column;align-items:flex-start;justify-content:space-between;min-height:520px;padding:6px 4px 22px 12px}.status{display:flex;align-items:center;gap:8px;color:#d9e8d7;font-size:12px}.status::before{content:"";width:7px;height:7px;border-radius:50%;background:#a9d6a4}
-.replay-block{width:100%;text-shadow:0 2px 8px #111a14}.replay-block h2{font-size:13px;font-weight:520;color:#c9d1e1;margin:0 0 2px}.time{font:clamp(40px,5vw,68px)/1.2 Plex,monospace;letter-spacing:-.07em}.primary{display:inline-flex;align-items:center;gap:8px;background:var(--accent);color:#29190f;font-weight:650;padding:12px 15px}.primary:hover{background:#ffd0a8}.primary img{filter:none}.replay-block .primary{margin-top:13px}.primary kbd{margin-left:10px;font:11px Plex,monospace;background:#283b1912;padding:3px 5px;border-radius:4px}
-#feedback,.copy-notice{display:block;font-size:12px;line-height:1.5;color:#d0d6e5;margin-top:14px;min-height:18px}
-.settings-panel{max-width:650px}.settings-panel p{color:var(--muted);font-size:14px}.settings-box{background:#20283ce8;border-radius:15px;padding:22px;display:grid;gap:22px}.device{justify-content:space-between;gap:8px}.volume{display:grid;grid-template-columns:1fr auto;align-items:center;gap:12px}.volume output,.range-labels{font:14px Plex,monospace}.volume output{text-align:right;color:var(--accent)}.range-labels{display:flex;justify-content:space-between;font-size:10px}.reset{grid-area:2/2/4/3}.checks,.panel-actions{gap:12px;flex-wrap:wrap;font-size:13px}.panel-actions{margin-top:15px}
+.replay{display:flex;flex-direction:column;align-items:flex-start;justify-content:space-between;min-height:520px;padding:6px 4px 22px 12px}.status{display:flex;align-items:center;gap:8px;color:#e4e4e4;font-size:12px}.status::before{content:"";width:7px;height:7px;border-radius:50%;background:#c9c9c9}
+.replay-block{width:100%;text-shadow:0 2px 8px #181818}.replay-block h2{font-size:13px;font-weight:520;color:#d0d0d0;margin:0 0 2px}.time{font:clamp(40px,5vw,68px)/1.2 Plex,monospace;letter-spacing:-.07em}.primary{display:inline-flex;align-items:center;gap:8px;background:var(--accent);color:#1c1c1c;font-weight:650;padding:12px 15px}.primary:hover{background:#d7d7d7}.primary img{filter:none}.replay-block .primary{margin-top:13px}.primary kbd{margin-left:10px;font:11px Plex,monospace;background:#35353512;padding:3px 5px;border-radius:4px}
+#feedback,.copy-notice{display:block;font-size:12px;line-height:1.5;color:#d6d6d6;margin-top:14px;min-height:18px}
+.settings-panel{max-width:650px}.settings-panel p{color:var(--muted);font-size:14px}.settings-box{background:#282828e8;border-radius:15px;padding:22px;display:grid;gap:22px}.device{justify-content:space-between;gap:8px}.volume{display:grid;grid-template-columns:1fr auto;align-items:center;gap:12px}.volume output,.range-labels{font:14px Plex,monospace}.volume output{text-align:right;color:var(--accent)}.range-labels{display:flex;justify-content:space-between;font-size:10px}.reset{grid-area:2/2/4/3}.checks,.panel-actions{gap:12px;flex-wrap:wrap;font-size:13px}.panel-actions{margin-top:15px}
 button,input{transition:background-color .16s,color .16s,opacity .16s}.track{animation:arrive .25s ease-out both}@keyframes arrive{from{opacity:.25;transform:translateY(4px)}}
 [hidden]{display:none!important}
 @media(max-width:880px){.app{grid-template-columns:74px minmax(0,1fr)}.workspace{padding:22px 18px 22px 6px}#captura{gap:12px;grid-template-columns:minmax(0,1.55fr) minmax(165px,.7fr)}#mixer{padding-inline:12px}.replay{padding-left:5px}}
 @media(max-width:670px){.app{width:calc(100% - 12px);margin:6px;display:block;min-height:0}.rail,.tabs{display:flex;align-items:center}.rail{flex-direction:row;gap:12px;padding:10px 14px}.tabs{gap:3px;width:auto}.tabs button{padding:6px 8px}.rail #motion{margin:0 0 0 auto;width:auto;padding:6px}.brand{font-size:25px}.workspace{padding:12px}#captura{display:flex;flex-direction:column;gap:12px}.mixing>.actions{margin:9px 0 16px}.mixing h1{font-size:26px}.replay{min-height:0;flex-direction:row;align-items:center;padding:2px 4px}.replay-block{width:auto;display:grid;grid-template-columns:auto auto;align-items:center;gap:2px 8px}.replay-block h2{font-size:10px}.time{font-size:24px;grid-area:2/1}.replay-block .primary{grid-area:1/2/3/3;margin:0;font-size:12px;padding:9px}.primary kbd{display:none}.status{font-size:10px}.device{flex-wrap:wrap}.profile{font-size:10px}.signal{height:17px}.track{padding-block:9px}.rail #motion span{display:none}.count{font-size:9px}.gain{gap:4px}}
 .gain input{appearance:none;height:24px;background:transparent}
-.gain input::-webkit-slider-runnable-track{height:5px;border-radius:5px;background:linear-gradient(to right,var(--tint) var(--fill,50%),#546078 var(--fill,50%))}
+.gain input::-webkit-slider-runnable-track{height:5px;border-radius:5px;background:linear-gradient(to right,var(--tint) var(--fill,50%),#5f5f5f var(--fill,50%))}
 .gain input::-webkit-slider-thumb{appearance:none;width:12px;height:15px;margin-top:-5px;border-radius:4px;background:var(--tint);box-shadow:0 2px 4px #0004;transition:transform .14s ease-out}
 .gain input:hover::-webkit-slider-thumb{transform:scale(1.12)}
 .gain input:active::-webkit-slider-thumb{transform:scale(1.2)}
@@ -45,7 +45,7 @@ button,input{transition:background-color .16s,color .16s,opacity .16s}.track{ani
 section[data-panel]:not([hidden]){animation:panel-in .2s ease-out}
 @keyframes panel-in{from{opacity:.7;transform:translateY(3px)}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
-.time,.profile{background:#0c1324ed;border-radius:6px;box-decoration-break:clone}.time{width:fit-content;padding-right:5px}.profile{padding:3px 5px}</style>
+.time,.profile{background:#131313ed;border-radius:6px;box-decoration-break:clone}.time{width:fit-content;padding-right:5px}.profile{padding:3px 5px}</style><link rel="stylesheet" href="studio.css">
 <main class="app">
 <canvas id="front" class="pond fish" aria-hidden="true"></canvas>
 <aside class="rail"><span class="brand"><img src="ui-assets/cut.svg" width="40" height="35" alt="Cut"></span><nav class="tabs" aria-label="Secciones"><button data-page="captura" aria-current="page"><img class="icon" src="ui-assets/waveform.svg" alt="">Captura</button><button data-page="clips"><img class="icon" src="ui-assets/film-strip.svg" alt="">Clips</button><button data-page="ajustes"><img class="icon" src="ui-assets/sliders-horizontal.svg" alt="">Ajustes</button></nav><button id="motion" aria-label="Pausar fondo"><img class="icon" src="ui-assets/pause.svg" alt=""><span>Pausar fondo</span></button></aside>
@@ -56,41 +56,61 @@ section[data-panel]:not([hidden]){animation:panel-in .2s ease-out}
     <div class="mixer-head"><div class="mix-title"><h2>Mezclador</h2><span class="count" id="count"></span></div><button id="refresh" title="Buscar aplicaciones que reproducen audio"><img class="icon" src="ui-assets/arrows-clockwise.svg" alt="">Buscar pistas</button></div>
     <div class="columns"><span>Incluir en el clip</span><span>Volumen</span></div><div id="tracks"></div>
   </section></div>
-  <aside class="replay"><span class="status">Captura activa</span><div class="replay-block"><h2>Replay disponible</h2><div class="time">00:30</div><button class="primary" id="save"><img class="icon" src="ui-assets/floppy-disk.svg" alt="">Guardar clip <kbd>F9</kbd></button></div></aside>
+  <aside class="replay"><div class="replay-block"><button class="primary" id="save"><img class="icon" src="ui-assets/floppy-disk.svg" alt="">Guardar clip <kbd>F9</kbd></button></div><span class="status">Captura activa</span></aside>
 </section>
-    <section class="settings-panel" id="ajustes" data-panel hidden>
-      <div>
-        <h2 tabindex="-1">Micrófono</h2>
-        <p>Estos ajustes se aplican a los clips nuevos.</p>
-        <div class="settings-box">
-          <label class="device">Dispositivo <select class="source"><option>Micrófono predeterminado</option><option>Micrófono USB</option></select></label>
+
+<section class="studio" id="ajustes" data-panel hidden>
+<h1>Ajustes</h1>
+<div class="preferences">
+<aside class="identity"><pre id="ascii-mark" aria-hidden="true">
+
+
+                   %#x+.
+                   +#####%+::.
+                 .+%#############%x:           ..
+              .x######%xxxxx%%xx%%###%:     +%#####.
+            :%####%xx%##################+:%########%
+           x####%x%%##%xxx%%%xxx++x+%############x:
+          x###%xx##%%%%%x+x####+xxx%xx%%#%%####%.
+         :###%x%%%#%:      ###%    .+%%%xx#####
+         ####x%%#x         +##x       :##x####+
+         ###%xx#:           .%:        :######+
+        .###xx%+                        ######+
+         ###xx#                         %##%##
+         %##%x#.                         +x+.
+         :###xx%                         :           :
+          x###%%%                        x#%+     +%x
+           :####%#x                       %###+x##x
+             x####%%x.                     %#+ ::
+               x####%%%+:              :+%#+
+                 .+%#####%%xxxxx+xx%%%#%+.
+                     :+xx%%####%%%+:.
+
+                                                          </pre><div class="identity-caption"><strong>Cut</strong><span>Windows · Rust</span></div><div class="version-line"><span>Versión</span><b>Prototipo de diseño</b></div></aside>
+<div class="preference-controls"><section class="surface"><h2>Inicio</h2><label class="field"><span>Iniciar con Windows<small>Abrir Cut al iniciar sesión.</small></span><input id="startup" type="checkbox" role="switch"></label><label class="field"><span>Minimizar al cerrar<small>Al desactivar esta opción, Cut queda en la bandeja.</small></span><input id="minimize-on-close" type="checkbox" role="switch"></label></section>
+<section class="surface"><h2>Micrófono global</h2><p>Para todas las capturas nuevas.</p><label class="device">Dispositivo <select class="source"><option>Micrófono predeterminado</option><option>Micrófono USB</option></select></label>
           <div class="volume">
             <label for="global-volume">Volumen de grabación</label><output for="global-volume">100%</output>
-            <input id="global-volume" type="range" min="0" max="200" value="100" aria-valuetext="100%">
+            <div class="ascii-slider"><pre id="gain-scale" aria-hidden="true"></pre><input id="global-volume" type="range" min="0" max="200" value="100" aria-valuetext="100%"></div>
             <button type="button" class="text-button reset" data-reset="global-volume">Restablecer</button>
             <div class="range-labels" aria-hidden="true"><span>0%</span><span>100%</span><span>200%</span></div>
           </div>
-          <div class="checks"><label><input type="checkbox" id="mic-mono" checked> Mono (voz centrada)</label><label><input type="checkbox" id="mic-mute"> Silenciar micrófono</label></div>
-        </div>
-      </div>
-    </section>
-    <section class="settings-panel" id="clips" data-panel hidden>
-      <div>
-        <h2 tabindex="-1">Clip de ejemplo</h2>
-        <p>30 segundos · MKV · 4 pistas de audio</p>
-        <div class="settings-box">
-          <div class="volume">
-            <label for="clip-volume">Volumen del micrófono en este clip</label><output for="clip-volume">100%</output>
-            <input id="clip-volume" type="range" min="0" max="200" value="100" aria-valuetext="100%">
-            <button type="button" class="text-button reset" data-reset="clip-volume">Restablecer</button>
-            <div class="range-labels" aria-hidden="true"><span>0%</span><span>100%</span><span>200%</span></div>
-          </div>
-        </div>
-        <div class="panel-actions"><button type="button" class="primary" data-copy>Guardar copia</button><output class="copy-notice" aria-live="polite"></output></div>
-      </div>
-    </section>
-
-<output id="feedback" aria-live="polite"></output>
+          <div class="checks"><label><input type="checkbox" role="switch" id="mic-mono" checked> Mono (voz centrada)</label><label><input type="checkbox" role="switch" id="mic-mute"> Silenciar micrófono</label><label><input type="checkbox" role="switch" id="mic-voice" checked> Mejorar voz</label></div></section></div>
+</div></section>
+<section class="studio" id="clips" data-panel hidden><h1>Clips</h1>
+<form id="clip-profile" class="clip-layout">
+<div class="clip-fields"><section class="surface"><h2>Fuente de captura</h2>
+<fieldset class="choices"><legend>Grabar</legend><div><label><input type="radio" name="mode" value="Ventana del juego" checked><span>Ventana del juego</span></label><label><input type="radio" name="mode" value="Monitor completo"><span>Pantalla completa</span></label></div></fieldset>
+<label class="field" id="game-field">Ventana de ejemplo <select id="game"><option>Juego principal</option><option>Segundo juego</option></select></label>
+<label class="field" id="monitor-field" hidden>Pantalla de ejemplo <select id="monitor"><option>Pantalla 1 · Principal</option><option>Pantalla 2 · Secundaria</option></select></label></section>
+<section class="surface"><h2>Video</h2>
+<fieldset class="choices"><legend>Resolución</legend><div><label><input type="radio" name="resolution" value="720p"><span>720p</span></label><label><input type="radio" name="resolution" value="1080p" checked><span>1080p</span></label><label><input type="radio" name="resolution" value="1440p"><span>1440p</span></label><label><input type="radio" name="resolution" value="2160p"><span>2160p</span></label></div></fieldset>
+<fieldset class="choices"><legend>Fotogramas por segundo</legend><div><label><input type="radio" name="fps" value="30"><span>30 FPS</span></label><label><input type="radio" name="fps" value="60" checked><span>60 FPS</span></label><label><input type="radio" name="fps" value="90"><span>90 FPS</span></label><label><input type="radio" name="fps" value="120"><span>120 FPS</span></label></div></fieldset>
+<fieldset class="choices"><legend>Bitrate</legend><div><label><input type="radio" name="rate" value="10"><span>10 Mb/s</span></label><label><input type="radio" name="rate" value="20" checked><span>20 Mb/s</span></label><label><input type="radio" name="rate" value="40"><span>40 Mb/s</span></label><label><input type="radio" name="rate" value="80"><span>80 Mb/s</span></label></div></fieldset></section></div>
+<section class="surface replay-config"><h2>Duración del replay</h2><div class="clock-face"><output id="summary-time"></output></div>
+<fieldset class="choices"><legend>Tiempo que guarda F9</legend><div><label><input type="radio" name="seconds" value="15"><span>15 s</span></label><label><input type="radio" name="seconds" value="30" checked><span>30 s</span></label><label><input type="radio" name="seconds" value="60"><span>1 min</span></label><label><input type="radio" name="seconds" value="120"><span>2 min</span></label><label><input type="radio" name="seconds" value="300"><span>5 min</span></label></div></fieldset>
+<div class="framing"><div class="frame-demo" aria-hidden="true"><i></i><span>→</span><i></i></div><div><strong>Salida 16:9 estirada</strong><small id="dimensions"></small></div></div><small>La imagen 4:3 se ensancha hasta llenar el cuadro.</small><div class="file-stat"><span>Video estimado</span><strong id="estimate"></strong></div><small id="summary-format"></small><small>MP4 · Estimación sin audio</small>
+</section></form></section><output id="feedback" aria-live="polite"></output>
 </div>
 </main>
 <script>
@@ -101,13 +121,12 @@ const trackList = $('#tracks');
 const feedback = $('#feedback');
 const globalGain = $('#global-volume');
 const mute = $('#mic-mute');
-const clipGain = $('#clip-volume');
 const params = new URLSearchParams(location.search);
 const tracks = new Map();
 const catalog = [
-  ['game','Juego','#ffad85'], ['discord','Discord','#b2c6e9'],
-  ['spotify','Spotify','#a6d5a9'], ['mic','Micrófono','#f2b2a5'],
-  ['browser','Navegador','#d9cc98']
+  ['game','Juego','#ffb57f'], ['discord','Discord','#aab4ff'],
+  ['spotify','Spotify','#87dbaa'], ['mic','Micrófono',getComputedStyle(app).getPropertyValue('--mic-tint').trim()],
+  ['browser','Navegador','#f1cf79']
 ];
 function openPanel(name){
   for(const panel of document.querySelectorAll('[data-panel]')) panel.hidden = panel.id !== name;
@@ -115,7 +134,7 @@ function openPanel(name){
     if(tab.dataset.page===name) tab.setAttribute('aria-current','page');
     else tab.removeAttribute('aria-current');
   }
-  if(name==='captura') for(const track of tracks.values()) drawSignal(track);
+  feedback.value=''; if(name==='captura') for(const track of tracks.values()) drawSignal(track);
 }
 document.querySelectorAll('[data-page]').forEach(button=>button.onclick=()=>openPanel(button.dataset.page));
 function rng(x,y){const v=Math.sin(x*127.1+y*311.7)*43758.5453;return v-Math.floor(v);}
@@ -128,13 +147,19 @@ function drawSignal(track){
   const c=canvas.getContext('2d');c.scale(dpr,dpr);
   c.fillStyle=track.color;c.font='9px Consolas,monospace';
   const columns=Math.floor(w/8);
+  const quiet=track.level!==undefined && track.level<.025;
+  const level=quiet ? .72 : (track.level ?? track.gain.value/100);
   for(let i=0;i<columns;i++){
     const phase=i*.30+track.index*2.6;
-    const shape=Math.min(1,(.10+.88*Math.pow(Math.abs(Math.sin(phase)),3)*(.3+.7*rng(i,track.index)))*track.gain.value/100);
+    const shape=Math.min(1,(.10+.88*Math.pow(Math.abs(Math.sin(phase)),3)*(.3+.7*rng(i,track.index)))*level);
     for(let y=-1;y<=1;y++){
       const strength=shape-Math.abs(y)*.32;
-      if(strength<.04 || !track.include.checked)continue;
-      c.globalAlpha=Math.min(1,.2+strength);
+      if(!track.include.checked)continue;
+      if(strength<.04){
+        if(y===0){c.globalAlpha=.34;c.fillText('·',i*8,h/2+3);}
+        continue;
+      }
+      c.globalAlpha=quiet ? .43 + strength*.38 : Math.min(1,.2+strength);
       c.fillText('·:+x%#@'[Math.min(6,Math.floor(strength*7))],i*8,h/2+3+y*5);
     }
   }
@@ -149,16 +174,16 @@ function syncTrack(track){
   drawSignal(track);
 }
 function showGain(input){
-  input.parentElement.querySelector('output').value=input.value+'%';
+  input.closest('.volume').querySelector('output').value=input.value+'%';
   input.setAttribute('aria-valuetext',input.value+'%');
 }
-function addTrack([id,name,color]){
+function addTrack([id,name,color,icon]){
   if(tracks.has(id))return;
   const row=document.createElement('div');
   row.className='track';row.style.setProperty('--tint',color);
-  row.innerHTML='<label><input type="checkbox" checked><span></span></label><canvas class="signal" aria-hidden="true"></canvas><div class="gain"><input type="range" min="0" max="200" value="100"><output class="readout"></output></div>';
+  row.innerHTML='<label><input type="checkbox" role="switch" checked><span></span></label><canvas class="signal" aria-hidden="true"></canvas><div class="gain"><input type="range" min="0" max="200" value="100"><output class="readout"></output></div>';
   const icons={game:'game-controller',discord:'discord-logo',spotify:'spotify-logo',mic:'microphone',browser:'browser'};
-  const image=document.createElement('img');image.className='icon';image.alt='';image.src='ui-assets/'+icons[id]+'.svg';
+  const image=document.createElement('img');image.className='icon';image.alt='';image.src='ui-assets/'+(icon || icons[id] || 'waveform')+'.svg';
   const label=row.querySelector('label span');label.before(image);label.textContent=name;
   const track={row,name,color,index:tracks.size,include:row.querySelector('[type=checkbox]'),gain:row.querySelector('[type=range]'),value:row.querySelector('output'),canvas:row.querySelector('canvas')};
   track.gain.id='volume-'+id;
@@ -196,13 +221,10 @@ globalGain.oninput=()=>{
 mute.onchange=()=>{
   const mic=tracks.get('mic');mic.include.checked=!mute.checked;syncTrack(mic);updateCount();
 };
-clipGain.oninput=()=>{showGain(clipGain);$('.copy-notice').value='';};
 for(const reset of document.querySelectorAll('[data-reset]')){
   reset.onclick=()=>{const input=document.getElementById(reset.dataset.reset);input.value=100;input.dispatchEvent(new Event('input'));};
 }
-$('[data-copy]').onclick=()=>$('.copy-notice').value='Ejemplo · Copia con el micrófono al '+clipGain.value+'%.';
-function previewSave(){openPanel('captura');feedback.value='Ejemplo · 30 s con '+[...tracks.values()].filter(t=>t.include.checked).length+' pistas seleccionadas.';}
-$('#save').onclick=previewSave;
+$('#save').onclick=()=>previewSave();
 document.addEventListener('keydown',e=>{if(e.key==='F9'&&!e.repeat){e.preventDefault();previewSave();}});
 
 // Keep the glyphs in body coordinates so the scales travel with each fish.
@@ -217,7 +239,7 @@ const sharks=[
 let swimming=!matchMedia('(prefers-reduced-motion: reduce)').matches;
 let seconds=0, timer=null, previousTick=0;
 let pondWidth=0, pondHeight=0;
-const sharksInk=['#e0ecfc','#b6cbe1','#91abc8','#748eab','#5d7594','#4d627d'];
+const sharksInk=['#ebebeb','#c8c8c8','#a8a8a8','#8b8b8b','#727272','#5f5f5f'];
 const marks=['.',':',';','t','o','X','S','%','8','@'];
 let typeAtlas;
 
@@ -361,4 +383,4 @@ $('#motion').onclick=()=>{swimming=!swimming;syncMotion();};
 document.addEventListener('visibilitychange',syncMotion);syncMotion();
 openPanel(panelNames.includes(params.get('panel'))?params.get('panel'):'captura');
 </script>
-</html>
+<script src="studio.js"></script></html>

@@ -1,0 +1,613 @@
+use std::{
+    borrow::Cow,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    thread,
+    time::{Duration, Instant},
+};
+
+use global_hotkey::{
+    GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
+    hotkey::{Code, HotKey},
+};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use tao::platform::windows::{WindowBuilderExtWindows, WindowExtWindows};
+use tao::{
+    dpi::LogicalSize,
+    event::{Event, StartCause, WindowEvent},
+    event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
+    window::WindowBuilder,
+};
+use tray_icon::{
+    Icon, TrayIconBuilder,
+    menu::{Menu, MenuEvent, MenuItem},
+};
+use windows::Win32::{
+    Foundation::HWND,
+    Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn},
+};
+use windows_capture::{monitor::Monitor, window::Window};
+use winreg::{RegKey, enums::HKEY_CURRENT_USER};
+use wry::{
+    WebView, WebViewBuilder, WebViewBuilderExtWindows,
+    http::{Response, StatusCode},
+};
+
+use crate::{
+    audio,
+    replay::{Profile, Replay, Result, Snapshot},
+};
+
+const ORIGIN: &str = "https://cut.local";
+const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+const ASSETS: &[(&str, &str, &[u8])] = &[
+    (
+        "/",
+        "text/html; charset=utf-8",
+        include_bytes!("../docs/superpowers/concepts/cut-ascii.html"),
+    ),
+    (
+        "/studio.css",
+        "text/css",
+        include_bytes!("../docs/superpowers/concepts/studio.css"),
+    ),
+    (
+        "/studio.js",
+        "application/javascript",
+        include_bytes!("../docs/superpowers/concepts/studio.js"),
+    ),
+    (
+        "/ui-assets/cut.svg",
+        "image/svg+xml",
+        include_bytes!("../docs/superpowers/concepts/ui-assets/cut.svg"),
+    ),
+    (
+        "/ui-assets/waveform.svg",
+        "image/svg+xml",
+        include_bytes!("../docs/superpowers/concepts/ui-assets/waveform.svg"),
+    ),
+    (
+        "/ui-assets/film-strip.svg",
+        "image/svg+xml",
+        include_bytes!("../docs/superpowers/concepts/ui-assets/film-strip.svg"),
+    ),
+    (
+        "/ui-assets/sliders-horizontal.svg",
+        "image/svg+xml",
+        include_bytes!("../docs/superpowers/concepts/ui-assets/sliders-horizontal.svg"),
+    ),
+    (
+        "/ui-assets/pause.svg",
+        "image/svg+xml",
+        include_bytes!("../docs/superpowers/concepts/ui-assets/pause.svg"),
+    ),
+    (
+        "/ui-assets/play.svg",
+        "image/svg+xml",
+        include_bytes!("../docs/superpowers/concepts/ui-assets/play.svg"),
+    ),
+    (
+        "/ui-assets/monitor.svg",
+        "image/svg+xml",
+        include_bytes!("../docs/superpowers/concepts/ui-assets/monitor.svg"),
+    ),
+    (
+        "/ui-assets/floppy-disk.svg",
+        "image/svg+xml",
+        include_bytes!("../docs/superpowers/concepts/ui-assets/floppy-disk.svg"),
+    ),
+    (
+        "/ui-assets/arrows-clockwise.svg",
+        "image/svg+xml",
+        include_bytes!("../docs/superpowers/concepts/ui-assets/arrows-clockwise.svg"),
+    ),
+    (
+        "/ui-assets/game-controller.svg",
+        "image/svg+xml",
+        include_bytes!("../docs/superpowers/concepts/ui-assets/game-controller.svg"),
+    ),
+    (
+        "/ui-assets/discord-logo.svg",
+        "image/svg+xml",
+        include_bytes!("../docs/superpowers/concepts/ui-assets/discord-logo.svg"),
+    ),
+    (
+        "/ui-assets/spotify-logo.svg",
+        "image/svg+xml",
+        include_bytes!("../docs/superpowers/concepts/ui-assets/spotify-logo.svg"),
+    ),
+    (
+        "/ui-assets/microphone.svg",
+        "image/svg+xml",
+        include_bytes!("../docs/superpowers/concepts/ui-assets/microphone.svg"),
+    ),
+    (
+        "/ui-assets/browser.svg",
+        "image/svg+xml",
+        include_bytes!("../docs/superpowers/concepts/ui-assets/browser.svg"),
+    ),
+    (
+        "/ui-assets/Inter-LICENSE.txt",
+        "text/plain",
+        include_bytes!("../docs/superpowers/concepts/ui-assets/Inter-LICENSE.txt"),
+    ),
+    (
+        "/ui-assets/Plex-LICENSE.txt",
+        "text/plain",
+        include_bytes!("../docs/superpowers/concepts/ui-assets/Plex-LICENSE.txt"),
+    ),
+    (
+        "/ui-assets/Phosphor-LICENSE.txt",
+        "text/plain",
+        include_bytes!("../docs/superpowers/concepts/ui-assets/Phosphor-LICENSE.txt"),
+    ),
+    (
+        "/ui-assets/inter.woff2",
+        "font/woff2",
+        include_bytes!("../docs/superpowers/concepts/ui-assets/inter.woff2"),
+    ),
+    (
+        "/ui-assets/plex-mono.woff2",
+        "font/woff2",
+        include_bytes!("../docs/superpowers/concepts/ui-assets/plex-mono.woff2"),
+    ),
+];
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+enum Command {
+    Ready,
+    Sources,
+    AudioSources,
+    Audio { settings: audio::Settings },
+    Start { profile: Profile },
+    Pause,
+    Save,
+    Drag,
+    Minimize,
+    Maximize,
+    Hide,
+    Startup { enabled: bool },
+    MinimizeOnClose { enabled: bool },
+}
+
+enum Message {
+    Ui(Command),
+    Hotkey,
+    Saved(std::result::Result<PathBuf, String>),
+    AudioSources(std::result::Result<audio::Catalog, String>),
+    Show,
+    ToggleCapture,
+    Exit,
+    CaptureReleased,
+}
+
+#[derive(Serialize)]
+struct Source {
+    id: String,
+    label: String,
+}
+
+fn update(web: &WebView, name: &str, value: impl Serialize) {
+    if let Ok(payload) = serde_json::to_string(&value) {
+        let _ = web.evaluate_script(&format!("window.cutDesktop?.{name}({payload})"));
+    }
+}
+
+fn save_async(snapshot: Snapshot, directory: PathBuf, proxy: EventLoopProxy<Message>) {
+    let on_error = proxy.clone();
+    if let Err(error) = thread::Builder::new()
+        .name("cut-export".into())
+        .spawn(move || {
+            let result = std::panic::catch_unwind(|| {
+                snapshot.save(&directory).map_err(|error| error.to_string())
+            })
+            .unwrap_or_else(|_| Err("El exportador se interrumpió.".into()));
+            let _ = proxy.send_event(Message::Saved(result));
+        })
+    {
+        let _ = on_error.send_event(Message::Saved(Err(error.to_string())));
+    }
+}
+
+fn send_sources(web: &WebView) {
+    let primary = Monitor::primary()
+        .ok()
+        .map(|monitor| monitor.as_raw_hmonitor());
+    let mut monitors: Vec<_> = Monitor::enumerate()
+        .unwrap_or_default()
+        .into_iter()
+        .enumerate()
+        .map(|(index, monitor)| {
+            let is_primary = Some(monitor.as_raw_hmonitor()) == primary;
+            let name = monitor
+                .name()
+                .ok()
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| format!("Pantalla {}", index + 1));
+            let label = format!("{} · {}", index + 1, name);
+            (
+                is_primary,
+                Source {
+                    id: index.to_string(),
+                    label,
+                },
+            )
+        })
+        .collect();
+    monitors.sort_by_key(|(is_primary, _)| !is_primary);
+    let monitors: Vec<_> = monitors.into_iter().map(|(_, monitor)| monitor).collect();
+    let windows: Vec<_> = Window::enumerate()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|window| {
+            let title = window.title().ok()?;
+            if title.trim().is_empty() || title == "Cut" {
+                return None;
+            }
+            Some(Source {
+                id: (window.as_raw_hwnd() as isize).to_string(),
+                label: title,
+            })
+        })
+        .collect();
+    update(
+        web,
+        "sources",
+        json!({ "monitors": monitors, "windows": windows }),
+    );
+}
+
+fn startup_value() -> bool {
+    RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(RUN_KEY)
+        .and_then(|key| key.get_value::<String, _>("Cut"))
+        .is_ok()
+}
+
+fn set_startup(enabled: bool) -> std::io::Result<()> {
+    let (key, _) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(RUN_KEY)?;
+    if enabled {
+        key.set_value(
+            "Cut",
+            &format!("\"{}\"", std::env::current_exe()?.display()),
+        )
+    } else {
+        match key.delete_value("Cut") {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            result => result,
+        }
+    }
+}
+
+fn exports_dir() -> PathBuf {
+    std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Videos")
+        .join("Cut")
+}
+
+fn round_window(window: &tao::window::Window) {
+    let hwnd = HWND(window.hwnd() as *mut _);
+    unsafe {
+        if window.is_maximized() {
+            SetWindowRgn(hwnd, None, true);
+            return;
+        }
+        let bounds = window.outer_size();
+        if bounds.width == 0 || bounds.height == 0 {
+            return;
+        }
+        let diameter = (32.0 * window.scale_factor()).round() as i32;
+        let region = CreateRoundRectRgn(
+            0,
+            0,
+            bounds.width as i32,
+            bounds.height as i32,
+            diameter,
+            diameter,
+        );
+        if !region.is_invalid() && SetWindowRgn(hwnd, Some(region), true) == 0 {
+            let _ = DeleteObject(region.into());
+        }
+    }
+}
+
+fn icon_rgba() -> Result<(Vec<u8>, u32, u32)> {
+    let image = include_bytes!("../docs/superpowers/concepts/ui-assets/cut.png");
+    let mut reader = png::Decoder::new(std::io::Cursor::new(image)).read_info()?;
+    let mut pixels = vec![0; reader.output_buffer_size().ok_or("Icono inválido")?];
+    let frame = reader.next_frame(&mut pixels)?;
+    if frame.color_type != png::ColorType::Rgba || frame.bit_depth != png::BitDepth::Eight {
+        return Err("El icono de Cut requiere RGBA de 8 bits.".into());
+    }
+    pixels.truncate(frame.buffer_size());
+    Ok((pixels, frame.width, frame.height))
+}
+
+pub fn run() -> Result<()> {
+    let Some(instance) = crate::instance::Instance::open()? else {
+        return Ok(());
+    };
+    let event_loop = EventLoopBuilder::<Message>::with_user_event().build();
+    let (pixels, width, height) = icon_rgba()?;
+    let window = WindowBuilder::new()
+        .with_title("Cut")
+        .with_decorations(false)
+        .with_undecorated_shadow(false)
+        .with_window_icon(Some(tao::window::Icon::from_rgba(
+            pixels.clone(),
+            width,
+            height,
+        )?))
+        .with_inner_size(LogicalSize::new(1140, 710))
+        .with_min_inner_size(LogicalSize::new(720, 560))
+        .with_visible(false)
+        .build(&event_loop)?;
+    round_window(&window);
+    let event_proxy = event_loop.create_proxy();
+    let tray_menu = Menu::new();
+    let open_item = MenuItem::with_id("show", "Abrir Cut", true, None);
+    let capture_item = MenuItem::with_id("capture", "Iniciar captura", true, None);
+    let save_item = MenuItem::with_id("save", "Guardar clip", true, None);
+    let exit_item = MenuItem::with_id("exit", "Salir de Cut", true, None);
+    tray_menu.append_items(&[&open_item, &capture_item, &save_item, &exit_item])?;
+    let tray = TrayIconBuilder::new()
+        .with_tooltip("Cut")
+        .with_menu(Box::new(tray_menu))
+        .with_icon(Icon::from_rgba(pixels, width, height)?)
+        .build()?;
+    let menu_proxy = event_proxy.clone();
+    MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+        let action = match event.id().as_ref() {
+            "show" => Message::Show,
+            "capture" => Message::ToggleCapture,
+            "save" => Message::Ui(Command::Save),
+            "exit" => Message::Exit,
+            _ => return,
+        };
+        let _ = menu_proxy.send_event(action);
+    }));
+    let hotkey = GlobalHotKeyManager::new();
+    let registered = hotkey
+        .as_ref()
+        .is_ok_and(|manager| manager.register(HotKey::new(None, Code::F9)).is_ok());
+    let hotkey_proxy = event_proxy.clone();
+    GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
+        if event.state == HotKeyState::Pressed {
+            let _ = hotkey_proxy.send_event(Message::Hotkey);
+        }
+    }));
+    let ipc_proxy = event_proxy.clone();
+    let data = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("CutClipper")
+        .join("WebView");
+    let mut context = wry::WebContext::new(Some(data));
+    let web = WebViewBuilder::new_with_web_context(&mut context)
+        .with_https_scheme(true)
+        .with_background_color((18, 18, 18, 255))
+        .with_default_context_menus(false)
+        .with_initialization_script(include_str!("desktop.js"))
+        .with_custom_protocol("cut".into(), |_, request| {
+            let asset = ASSETS.iter().find(|entry| entry.0 == request.uri().path());
+            let Some((_, mime, bytes)) = asset else {
+                return Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .body(Cow::Borrowed(&[][..]))
+                    .unwrap();
+            };
+            Response::builder()
+                .header("Content-Type", *mime)
+                .header("X-Content-Type-Options", "nosniff")
+                .body(Cow::Borrowed(*bytes))
+                .unwrap()
+        })
+        .with_navigation_handler(|url| url == format!("{ORIGIN}/"))
+        .with_ipc_handler(move |request| {
+            if request.uri().host() == Some("cut.local")
+                && let Ok(command) = serde_json::from_str(request.body())
+            {
+                let _ = ipc_proxy.send_event(Message::Ui(command));
+            }
+        })
+        .with_url(format!("{ORIGIN}/"))
+        .build(&window)?;
+
+    let mut replay: Option<Replay> = None;
+    let audio = Arc::new(Mutex::new(audio::Settings::default()));
+    let mut next_audio_scan = Instant::now();
+    let mut scanning = false;
+    let mut saving = false;
+    let mut queued_save = None;
+    let mut retiring = false;
+    let mut pending_profile = None;
+    let mut paused = false;
+    let mut next_poll = Instant::now();
+    let directory = exports_dir();
+    let mut exiting = false;
+    let mut minimize_on_close = false;
+    let mut window_shape = (
+        window.outer_size(),
+        window.scale_factor(),
+        window.is_maximized(),
+    );
+    event_loop.run(move |event, _, flow| {
+        let _resources = (&hotkey, &tray);
+        *flow = ControlFlow::WaitUntil(next_poll);
+        match event {
+            Event::WindowEvent { event: WindowEvent::CloseRequested, .. }
+            | Event::UserEvent(Message::Ui(Command::Hide)) => {
+                if minimize_on_close {
+                    window.set_minimized(true);
+                } else {
+                    window.set_visible(false);
+                }
+            }
+            Event::WindowEvent { event: WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }, .. } => {
+                let shape = (window.outer_size(), window.scale_factor(), window.is_maximized());
+                if shape != window_shape {
+                    window_shape = shape;
+                    round_window(&window);
+                }
+            }
+            Event::UserEvent(Message::Show) => {
+                window.set_visible(true);
+                window.set_minimized(false);
+                window.set_focus();
+            }
+            Event::UserEvent(Message::ToggleCapture) => {
+                let _ = web.evaluate_script("window.cutDesktop?.toggleCapture()");
+            }
+            Event::UserEvent(Message::Exit) => {
+                exiting = true;
+                pending_profile = None;
+                if let Some(previous) = replay.take() {
+                    previous.pause();
+                    retiring = true;
+                    let proxy = event_proxy.clone();
+                    thread::spawn(move || {
+                        drop(previous);
+                        let _ = proxy.send_event(Message::CaptureReleased);
+                    });
+                }
+                if !retiring && !saving { *flow = ControlFlow::Exit; }
+            }
+            Event::UserEvent(Message::Ui(Command::Ready)) => {
+                send_sources(&web);
+                update(&web, "ready", json!({"startup": startup_value(), "version": env!("CARGO_PKG_VERSION"), "hotkey": registered}));
+                window.set_visible(true);
+            }
+            Event::UserEvent(Message::Ui(Command::Sources)) => send_sources(&web),
+            Event::UserEvent(Message::Ui(Command::Drag)) => {
+                let _ = window.drag_window();
+            }
+            Event::UserEvent(Message::Ui(Command::Minimize)) => window.set_minimized(true),
+            Event::UserEvent(Message::Ui(Command::Maximize)) => window.set_maximized(!window.is_maximized()),
+            Event::UserEvent(Message::Ui(Command::MinimizeOnClose { enabled })) => {
+                minimize_on_close = enabled;
+            }
+            Event::UserEvent(Message::Ui(Command::AudioSources)) => next_audio_scan = Instant::now(),
+            Event::UserEvent(Message::Ui(Command::Audio { settings })) => {
+                *audio.lock().unwrap() = settings;
+            }
+            Event::UserEvent(Message::AudioSources(result)) => {
+                scanning = false;
+                match result {
+                    Ok(catalog) => update(&web, "audioSources", catalog),
+                    Err(error) => update(&web, "audioError", error),
+                }
+            }
+            Event::UserEvent(Message::Ui(Command::Start { profile })) => {
+                if exiting { return; }
+                if !paused && replay.as_ref().is_some_and(|current| current.active() && current.profile == profile) {
+                    return;
+                }
+                paused = false;
+                if retiring {
+                    pending_profile = Some(profile);
+                } else if let Some(previous) = replay.take() {
+                    previous.pause();
+                    pending_profile = Some(profile);
+                    retiring = true;
+                    let proxy = event_proxy.clone();
+                    thread::spawn(move || {
+                        drop(previous);
+                        let _ = proxy.send_event(Message::CaptureReleased);
+                    });
+                } else {
+                    match Replay::start(profile, Arc::clone(&audio)) {
+                        Ok(capture) => replay=Some(capture),
+                        Err(error) => update(&web, "notice", error.to_string()),
+                    }
+                }
+            }
+            Event::UserEvent(Message::CaptureReleased) => {
+                retiring = false;
+                if exiting {
+                    if !saving { *flow = ControlFlow::Exit; }
+                } else if let Some(profile) = pending_profile.take() {
+                    let _ = event_proxy.send_event(Message::Ui(Command::Start { profile }));
+                }
+            }
+            Event::UserEvent(Message::Ui(Command::Pause)) => {
+                paused = true;
+                pending_profile = None;
+                if let Some(capture) = &replay { capture.pause(); }
+            }
+            Event::UserEvent(Message::Ui(Command::Startup { enabled })) => {
+                if let Err(error)=set_startup(enabled) {
+                    update(&web, "startup", startup_value());
+                    update(&web, "notice",format!("No se pudo cambiar el inicio con Windows. {error}"));
+                }
+            }
+            Event::UserEvent(Message::Ui(Command::Save) | Message::Hotkey) => {
+                if exiting { return; }
+                if queued_save.is_some() {
+                    update(&web, "notice", "Ya hay otro clip en espera.");
+                    return;
+                }
+                let snapshot = replay.as_ref().ok_or_else(|| "Activa la captura para llenar el replay.".into())
+                    .and_then(Replay::snapshot);
+                match snapshot {
+                    Ok(snapshot) => {
+                        if saving {
+                            queued_save = Some(snapshot);
+                            update(&web, "notice", "Segundo clip en espera.");
+                        } else {
+                            saving = true;
+                            update(&web, "notice", "Guardando clip…");
+                            save_async(snapshot, directory.clone(), event_proxy.clone());
+                        }
+                    }
+                    Err(error) => update(&web, "notice", error.to_string()),
+                }
+            }
+            Event::UserEvent(Message::Saved(result)) => {
+                saving = false;
+                let message = match result {
+                    Ok(path) => format!("Clip guardado en {}", path.display()),
+                    Err(error) => format!("No se pudo guardar el clip. {error}"),
+                };
+                update(&web, "notice", message);
+                if let Some(snapshot) = queued_save.take() {
+                    saving = true;
+                    save_async(snapshot, directory.clone(), event_proxy.clone());
+                } else if exiting && !retiring {
+                    *flow = ControlFlow::Exit;
+                }
+            }
+            Event::NewEvents(StartCause::ResumeTimeReached { .. }) | Event::MainEventsCleared if Instant::now() >= next_poll => {
+                next_poll=Instant::now()+Duration::from_millis(350);
+                *flow=ControlFlow::WaitUntil(next_poll);
+                if instance.take_open_request() {
+                    window.set_visible(true);
+                    window.set_minimized(false);
+                    window.set_focus();
+                }
+                let (seconds, error)=replay.as_ref().map_or((0,None), Replay::status);
+                let active = !paused && replay.as_ref().is_some_and(Replay::active);
+                capture_item.set_text(if active { "Pausar captura" } else { "Iniciar captura" });
+                update(&web, "status", json!({"seconds":seconds,"active":active,"error":error,"paused":paused}));
+                if let Some(capture) = &replay {
+                    update(&web, "audioNotices", capture.audio_notices());
+                }
+                update(&web, "levels", replay.as_ref().filter(|_| active).map(Replay::levels).unwrap_or_default());
+                if !scanning && Instant::now() >= next_audio_scan {
+                    next_audio_scan = Instant::now() + Duration::from_secs(2);
+                    scanning = true;
+                    let proxy = event_proxy.clone();
+                    thread::spawn(move || {
+                        let result = wasapi::initialize_mta().ok().map_err(|e| e.to_string())
+                            .and_then(|_| audio::discover().map_err(|e| e.to_string()));
+                        let _ = proxy.send_event(Message::AudioSources(result));
+                    });
+                }
+            }
+            _ => {}
+        }
+    })
+}
