@@ -1,45 +1,44 @@
 # Cut
 
-Cut guarda los últimos segundos de una ventana o pantalla como un archivo MP4. La aplicación para Windows 11 usa Rust. La interfaz se carga desde el mismo prototipo aprobado, con tiburones ASCII y tonos por pista de audio.
+**Replay instantáneo para Windows.** Cut guarda los últimos 15 segundos a 5 minutos de una ventana o pantalla en un MP4. Sigue capturando en la bandeja, así que puedes guardar lo que acaba de pasar con **F9** sin salir del juego.
 
-## Instalar en Windows
+[**Descargar Cut para Windows x64**](https://github.com/00faithlss/Cut/releases/latest) · [Historial de cambios](CHANGELOG.md)
 
-Para instalar Cut en Windows 11 de 64 bits, abre `Cut-<versión>-Setup-x64.exe`. El instalador crea un acceso en Inicio y prepara WebView2 si falta. Para actualizar o desinstalar, sal primero de Cut desde la bandeja. La desinstalación conserva los clips y el mezclador guardado.
+> **Aviso de Windows.** El instalador de Cut no está firmado digitalmente. Al abrirlo, Microsoft Defender SmartScreen puede mostrar Windows protegió su PC. Descárgalo desde el enlace oficial de arriba. Cada release incluye un archivo SHA-256 para comprobar la descarga.
+
+## Primer clip
+
+1. Descarga y ejecuta `Cut-<versión>-Setup-x64.exe`. Necesitas Windows 11 de 64 bits y una GPU con codificación H.264 por hardware. El instalador prepara WebView2 si hace falta.
+2. Abre Cut. La primera vez empieza a capturar la pantalla principal. En **Clips** puedes cambiar la fuente, la calidad y la duración del replay.
+3. Pulsa **F9** o **Guardar clip**. Cut emite un sonido breve cuando termina de guardar el MP4 en `Videos\Cut`.
+
+Puedes cambiar el destino en **Clips → Carpeta de clips**. Para reasignar F9, ve a **Ajustes → Atajo para guardar clips**, haz clic en la tecla y pulsa el nuevo atajo.
+
+## Video y audio
+
+- **Video.** Captura una ventana o el monitor completo. Elige entre 720p y 2160p, de 30 a 120 FPS y de 10 a 80 Mb/s. La cadencia real depende de la fuente, la GPU y la carga del equipo. La salida es 16:9 y las fuentes 4:3 se estiran para llenar el cuadro.
+- **Mezclador.** Las aplicaciones aparecen cuando emiten audio y se ocultan al cerrar o tras tres segundos de silencio. Cut recuerda el volumen y si cada pista se incluye en los clips.
+- **Pistas separadas.** El MP4 reproduce la mezcla de forma predeterminada y conserva las pistas AAC incluidas de las aplicaciones y el micrófono. Los controles de micrófono y supresión de ruido están en **Ajustes**.
+
+El replay mantiene el video comprimido en archivos temporales. Dos minutos a 40 Mb/s pueden ocupar unos 600 MB de disco. Cut libera los bloques al salir del historial cuando ninguna exportación los está usando.
+
+## Actualizar o salir
+
+Desde la versión 0.2.0, Cut comprueba si hay una versión nueva al iniciar y cada seis horas. También puedes comprobarlo desde **Ajustes → Buscar actualizaciones**. Si aparece **Ver actualización**, abre el release y descarga el instalador.
+
+Cerrar la ventana deja la captura activa. Para detener Cut por completo antes de actualizar o desinstalar, usa **Salir de Cut** en el menú de la bandeja. La desinstalación conserva los clips y los ajustes del mezclador.
 
 ## Compilar desde el código
 
-Se necesitan Rust estable x64 y Microsoft Edge WebView2 Runtime. Con la toolchain GNU, Cargo también requiere `dlltool.exe` de MinGW-w64 en el PATH. El script detecta las herramientas de compilación instaladas en el directorio local de Cut.
+Necesitas Rust estable x64 y Microsoft Edge WebView2 Runtime. Si usas la toolchain GNU, agrega `dlltool.exe` de MinGW-w64 al PATH.
 
 ```powershell
 ./scripts/build-windows.ps1 -Release
 ./target/release/cut.exe
 ```
 
-El script pone `WebView2Loader.dll` junto al ejecutable. Mantén ambos juntos al moverlos.
+Mantén `WebView2Loader.dll` junto a `cut.exe`. Para crear el instalador, usa Inno Setup 6.3 o posterior y ejecuta `./scripts/build-installer.ps1`. El resultado queda en `target/installer/`.
 
-Para construir el instalador, instala Inno Setup 6.3 o posterior y ejecuta `./scripts/build-installer.ps1`. El archivo queda en `target/installer/`.
+La captura usa DXGI Desktop Duplication para el monitor y Windows Graphics Capture para ventanas. D3D11 escala y convierte el video a NV12 en la GPU y Media Foundation lo codifica a H.264 por hardware.
 
-### Actualizaciones
-
-Desde Cut 0.2.0, la app consulta GitHub Releases al iniciar y cada seis horas. Si hay un instalador más nuevo, muestra **Ver actualización**. Puedes comprobarlo al instante desde **Ajustes → Buscar actualizaciones**. El enlace abre las notas y el instalador en GitHub, y puedes instalarlo después de salir de Cut. Los equipos necesitan acceso público al release para recibir el aviso.
-
-Cada push a `main` hace que GitHub Actions pruebe Cut, incremente la versión del instalador y publique el release de Windows x64 con su SHA-256. El historial de cambios está en [CHANGELOG.md](CHANGELOG.md).
-
-## Usar Cut
-
-1. En **Clips**, elige una ventana o pantalla y ajusta la duración y el video. Puedes seleccionar hasta 120 FPS si tu GPU admite ese perfil.
-2. Cut prepara el replay al abrir. La primera vez usa la pantalla principal. Después recupera tu selección y espera si la ventana elegida todavía no está abierta. En **Captura** puedes pausar o reanudar el replay. Pulsa **F9**, incluso con Cut en segundo plano, o **Guardar clip** para exportarlo a `Videos\Cut` de forma predeterminada. En **Clips → Carpeta de clips** puedes ver la ruta completa, abrirla o elegir otra para los próximos clips. Cut reproduce un sonido breve al guardar el MP4.
-3. En **Ajustes**, elige el micrófono y configura mono, silencio y volumen. **Supresión de ruido** controla la reducción de ruido y la nivelación automática de voz. Viene activada y se puede cambiar durante la captura.
-4. Al cerrar la ventana, Cut sigue capturando en la bandeja. Si activas **Minimizar al cerrar**, queda en la barra de tareas. Volver a abrir el ejecutable trae la misma ventana. Usa **Salir de Cut** para terminar la sesión. **Capturar cursor** incluye el puntero de Windows en el próximo replay.
-
-El MP4 reproduce la mezcla de Cut de forma predeterminada. Cada aplicación capturada y el micrófono también conservan su pista AAC. La salida H.264 siempre llena el cuadro 16:9. Una fuente 4:3 se estira horizontalmente.
-
-Mientras captura, Cut guarda el video comprimido del replay en archivos temporales de Windows. A 40 Mb/s, dos minutos de video equivalen aproximadamente a 600 MB de disco si el codificador alcanza ese bitrate. Cut libera los bloques antiguos cuando salen del replay y termina cualquier exportación que los esté usando.
-
-El mezclador agrupa las pestañas y ventanas de cada aplicación en una pista. Las pistas aparecen automáticamente cuando producen audio, se ocultan tras tres segundos de silencio y desaparecen al cerrar su sesión. Cut conserva sus ajustes de volumen e inclusión en `%LOCALAPPDATA%\CutClipper\mezclador.json`. Los controles globales del micrófono están en **Ajustes**.
-
-Los clips usan la fecha local del guardado. Una grabación del monitor se llama `Cut_07-03-2026.mp4` y una grabación de ventana puede llamarse `Cut_Valorant_07-03-2026.mp4`. Los siguientes clips con el mismo nombre reciben un número, como `_02`.
-
-La captura de pantalla completa usa DXGI Desktop Duplication. Para una ventana se usa Windows Graphics Capture con el modo sin borde solicitado a Windows. D3D11 escala y convierte el video a NV12 en la GPU y Media Foundation lo codifica a H.264 por hardware. Si el codificador falla, Cut muestra el error. Los FPS configurados fijan la cadencia objetivo. La cantidad de imágenes distintas depende de las que entregue Windows y de la capacidad de la GPU para procesarlas a tiempo. El replay empieza en el último fotograma clave anterior al inicio solicitado, así que el archivo puede durar algo más que el intervalo configurado. El atajo predeterminado es F9. Puedes cambiarlo en **Ajustes → Atajo para guardar clips**.
-
-[Abrir la maqueta en el navegador](docs/superpowers/concepts/cut-ascii.html) · [Ver la especificación](docs/superpowers/specs/2026-11-21-cut-design.md)
+[Reportar un problema](https://github.com/00faithlss/Cut/issues) · [Especificación de diseño](docs/superpowers/specs/2026-11-21-cut-design.md)
