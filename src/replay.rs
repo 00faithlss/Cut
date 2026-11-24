@@ -1,10 +1,10 @@
 use std::{
-    collections::VecDeque,
     fs,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     },
     thread::{self, JoinHandle},
     time::Duration,
@@ -15,13 +15,36 @@ use win_native_media::{
     CaptureTarget, VideoConfig,
     encoder::{EncodedSample, ParameterSets},
 };
+use windows::{
+    Win32::{
+        Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0},
+        Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12},
+        System::Threading::{
+            CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, INFINITE,
+            SYNCHRONIZATION_SYNCHRONIZE, SetWaitableTimer, TIMER_MODIFY_STATE, WaitForSingleObject,
+        },
+    },
+    core::PCWSTR,
+};
 
 use crate::{
     audio, capture_gpu::Capture, clip_name, cursor::Cursor, gpu::Encoder, mp4, scale::Scaler,
 };
 
-const MEMORY_LIMIT: usize = 384 * 1024 * 1024;
+#[path = "replay_store.rs"]
+pub(crate) mod storage;
+use storage::{Buffer, Frame};
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+const MAX_FRAME_DELAY: Duration = Duration::from_secs(3);
+
+fn check_freshness(latest: Duration, now: Duration) -> Result<()> {
+    if now.saturating_sub(latest) > MAX_FRAME_DELAY {
+        return Err(
+            "La captura se interrumpió. Espera a que el replay reciba video reciente.".into(),
+        );
+    }
+    Ok(())
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct Profile {
@@ -56,52 +79,21 @@ impl Profile {
     }
 }
 
-#[derive(Default)]
-struct Buffer {
-    bytes: usize,
-    samples: VecDeque<Arc<EncodedSample>>,
-    parameters: ParameterSets,
-    error: Option<String>,
-}
-
-impl Buffer {
-    fn push(&mut self, sample: EncodedSample, retain: Duration) {
-        if self.samples.is_empty() && !sample.is_keyframe {
-            return;
-        }
-        let cutoff = sample.timestamp.saturating_sub(retain);
-        self.bytes += sample.data.len();
-        self.samples.push_back(Arc::new(sample));
-        let begin = self
-            .samples
-            .iter()
-            .rposition(|s| s.is_keyframe && s.timestamp <= cutoff);
-        for _ in 0..begin.unwrap_or_default() {
-            self.bytes -= self.samples.pop_front().unwrap().data.len();
-        }
-        while self.bytes > MEMORY_LIMIT {
-            self.bytes -= self.samples.pop_front().unwrap().data.len();
-            while self.samples.front().is_some_and(|s| !s.is_keyframe) {
-                self.bytes -= self.samples.pop_front().unwrap().data.len();
-            }
-        }
-    }
-}
-
 pub struct Replay {
     pub profile: Profile,
     game_name: Option<String>,
     stop: Arc<AtomicBool>,
+    clock: Arc<audio::Clock>,
     data: Arc<Mutex<Buffer>>,
     audio: audio::Tracks,
     notices: audio::Notices,
-    settings: Arc<Mutex<audio::Settings>>,
+    settings: audio::SharedSettings,
     worker: Option<JoinHandle<()>>,
     audio_worker: Option<JoinHandle<()>>,
 }
 
 impl Replay {
-    pub fn start(profile: Profile, settings: Arc<Mutex<audio::Settings>>) -> Result<Self> {
+    pub fn start(profile: Profile, settings: audio::SharedSettings) -> Result<Self> {
         let (width, height) = profile.dimensions()?;
         let target = profile.target()?;
         let game_name = match target {
@@ -150,6 +142,7 @@ impl Replay {
         })?;
         let audio_start = thread::Builder::new().name("cut-audio".into()).spawn({
             let stop = Arc::clone(&stop);
+            let clock = Arc::clone(&clock);
             let history = Arc::clone(&history);
             let notices = Arc::clone(&notices);
             let settings = Arc::clone(&settings);
@@ -175,6 +168,7 @@ impl Replay {
             profile,
             game_name,
             stop,
+            clock,
             data,
             audio: history,
             notices,
@@ -199,24 +193,24 @@ impl Replay {
 
     pub fn status(&self) -> (u64, Option<String>) {
         let data = self.data.lock().unwrap();
-        let seconds = data
-            .samples
-            .front()
-            .zip(data.samples.back())
-            .map_or(0, |(a, b)| {
-                (b.timestamp.saturating_sub(a.timestamp)
-                    + Duration::from_millis(1000 / u64::from(self.profile.fps)))
+        let seconds = data.timestamps().map_or(0, |(a, b)| {
+            (b.saturating_sub(a) + Duration::from_millis(1000 / u64::from(self.profile.fps)))
                 .as_secs()
-            });
+        });
         (seconds.min(self.profile.seconds), data.error.clone())
     }
 
     pub fn snapshot(&self) -> Result<Snapshot> {
         let (width, height) = self.profile.dimensions()?;
         let data = self.data.lock().unwrap();
-        if data.samples.len() < 2 || data.parameters.sps.is_empty() {
+        if let Some(error) = &data.error {
+            return Err(format!("La captura se interrumpió. {error}").into());
+        }
+        if data.frames().take(2).count() < 2 || data.parameters.sps.is_empty() {
             return Err("Todavía no hay suficientes fotogramas para guardar un clip.".into());
         }
+        let (_, latest) = data.timestamps().ok_or("El replay está vacío.")?;
+        check_freshness(latest, self.clock.now()?)?;
         Ok(Snapshot {
             name: clip_name::new_name(self.game_name.as_deref()),
             video: mp4::Video {
@@ -225,7 +219,7 @@ impl Replay {
                 fps: self.profile.fps,
                 parameters: data.parameters.clone(),
             },
-            samples: data.samples.iter().cloned().collect(),
+            samples: data.frames().cloned().collect(),
             audio: {
                 let settings = self.settings.lock().unwrap();
                 self.audio
@@ -241,6 +235,21 @@ impl Replay {
 
     pub fn active(&self) -> bool {
         !self.stop.load(Ordering::Relaxed) && self.worker.as_ref().is_some_and(|w| !w.is_finished())
+    }
+
+    pub fn stalled(&self) -> bool {
+        if !self.active() {
+            return true;
+        }
+        self.data
+            .lock()
+            .unwrap()
+            .timestamps()
+            .is_some_and(|(_, latest)| {
+                self.clock
+                    .now()
+                    .is_ok_and(|now| check_freshness(latest, now).is_err())
+            })
     }
 
     pub fn pause(&self) {
@@ -264,7 +273,7 @@ impl Drop for Replay {
 pub struct Snapshot {
     name: String,
     video: mp4::Video,
-    samples: Vec<Arc<EncodedSample>>,
+    samples: Vec<Frame>,
     audio: Vec<audio::History>,
 }
 
@@ -290,86 +299,222 @@ fn record(
     data: &Mutex<Buffer>,
     clock: &audio::Clock,
 ) -> Result<()> {
+    // La cola acotada aísla las escrituras del hilo de la GPU.
+    thread::scope(|scope| {
+        let (tx, rx) = mpsc::sync_channel::<(EncodedSample, Option<ParameterSets>)>(8);
+        let writer = scope.spawn(move || -> std::io::Result<()> {
+            let mut writer = storage::Writer::default();
+            for (packet, parameters) in rx {
+                let frame = writer.append(packet)?;
+                let mut buffer = data.lock().unwrap();
+                if let Some(parameters) = parameters {
+                    buffer.parameters = parameters;
+                }
+                buffer.push(frame, retain);
+            }
+            Ok(())
+        });
+        let recording = record_frames(target, config, include_cursor, stop, tx, clock);
+        writer
+            .join()
+            .map_err(|_| "Falló el hilo del historial temporal.")?
+            .map_err(|error| format!("No se pudo escribir el historial temporal: {error}"))?;
+        recording
+    })
+}
+
+fn record_frames(
+    target: CaptureTarget,
+    config: VideoConfig,
+    include_cursor: bool,
+    stop: &AtomicBool,
+    tx: mpsc::SyncSender<(EncodedSample, Option<ParameterSets>)>,
+    clock: &audio::Clock,
+) -> Result<()> {
     // El hilo posee la sesión de captura, las texturas y el codificador.
-    unsafe {
-        windows::Win32::System::Com::CoInitializeEx(
-            None,
-            windows::Win32::System::Com::COINIT_MULTITHREADED,
-        )
-        .ok()?;
-    }
+    let _apartment = crate::com::Mta::enter()?;
     let mut capture =
         Capture::open(target, include_cursor).map_err(|error| format!("Captura: {error}"))?;
     let mut encoder = Encoder::new(capture.device(), config)
         .map_err(|error| format!("Inicio del codificador GPU: {error}"))?;
-    let mut scaler = Scaler::new(capture.device(), config.width, config.height)?;
-    let mut cursor = (include_cursor && matches!(target, CaptureTarget::Monitor(_)))
-        .then(|| {
-            Cursor::new(
-                capture.device(),
-                scaler.texture(),
-                config.width,
-                config.height,
-            )
-        })
-        .transpose()?;
+    let mut nv12 = Scaler::new(
+        capture.device(),
+        config.width,
+        config.height,
+        config.fps,
+        DXGI_FORMAT_NV12,
+    )?;
+    let mut cursor = if include_cursor && matches!(target, CaptureTarget::Monitor(_)) {
+        let bgra = Scaler::new(
+            capture.device(),
+            config.width,
+            config.height,
+            config.fps,
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+        )?;
+        let target = bgra.create_target()?;
+        let cursor = Cursor::new(capture.device(), &target, config.width, config.height)?;
+        Some((bgra, target, cursor))
+    } else {
+        None
+    };
+    let timer = FrameTimer::new();
     let mut packets = Vec::new();
     let interval = Duration::from_nanos(1_000_000_000 / u64::from(config.fps));
     let mut next = Duration::ZERO;
     let initial = std::time::Instant::now();
     let mut has_output = false;
-    let mut has_source = false;
+    let mut last_frame = None;
     while !stop.load(Ordering::Relaxed) {
         encoder
             .poll(&mut packets)
             .map_err(|error| format!("Salida del codificador GPU: {error}"))?;
-        if !packets.is_empty() {
+        for packet in packets.drain(..) {
+            let parameters = packet.is_keyframe.then(|| encoder.parameters.clone());
+            tx.send((packet, parameters))
+                .map_err(|_| "Se cerró el historial temporal.")?;
             has_output = true;
-            let mut buffer = data.lock().unwrap();
-            if buffer.parameters.sps.is_empty() {
-                buffer.parameters = encoder.parameters.clone();
-            }
-            for packet in packets.drain(..) {
-                buffer.push(packet, retain);
-            }
-        }
-        capture.with_frame(clock, cursor.as_mut(), |frame| {
-            if !has_source || frame.timestamp >= next.saturating_sub(interval / 2) {
-                scaler.stretch(frame)?;
-                has_source = true;
-            }
-            Ok(())
-        })?;
-        // Una escena quieta puede dejar de entregar frames. Se mantiene el
-        // reloj del replay con la última imagen válida, que sigue en la GPU.
-        let now = clock.now()?;
-        if has_source && now >= next {
-            if now.saturating_sub(next) > interval * 2 {
-                next = now;
-            }
-            let texture = scaler.texture();
-            let texture = cursor
-                .as_ref()
-                .map_or(texture, |cursor| cursor.render(texture));
-            encoder
-                .feed(texture, next)
-                .map_err(|error| format!("Entrada del codificador GPU: {error}"))?;
-            next += interval;
         }
         if !has_output && initial.elapsed() > Duration::from_secs(8) {
             return Err("La GPU no entregó fotogramas H.264.".into());
         }
-        thread::sleep(Duration::from_millis(1));
+        let now = clock.now()?;
+        if now >= next && encoder.accepts_input() {
+            let Some(input) = encoder.input_frame()? else {
+                // Deja que el codificador recupere todas las superficies si se saturó.
+                last_frame = None;
+                timer.wait(Duration::from_millis(1));
+                continue;
+            };
+            let source = match &mut cursor {
+                Some((bgra, target, cursor)) => {
+                    // Conserva el cursor como capa independiente durante la captura del monitor.
+                    let updated = capture.with_frame(clock, Some(cursor), |frame| {
+                        Ok(bgra.stretch(frame, target, 0)?)
+                    })?;
+                    if updated {
+                        let rendered = cursor.render(target);
+                        nv12.stretch_texture(
+                            rendered,
+                            config.width,
+                            config.height,
+                            &input.texture,
+                            input.index,
+                        )?;
+                    }
+                    updated
+                }
+                None => capture.with_frame(clock, None, |frame| {
+                    Ok(nv12.stretch(frame, &input.texture, input.index)?)
+                })?,
+            };
+            if source || last_frame.is_some() {
+                if let Some(previous) = last_frame.as_ref().filter(|_| !source) {
+                    encoder.repeat(previous, &input);
+                }
+                if now.saturating_sub(next) >= interval {
+                    next = now;
+                }
+                encoder
+                    .submit(&input, next)
+                    .map_err(|error| format!("Entrada del codificador GPU: {error}"))?;
+                // Retiene la muestra para que el pool no recicle la imagen que se repite.
+                if source {
+                    last_frame = Some(input);
+                }
+                next += interval;
+            }
+        }
+        let until_frame = next.saturating_sub(clock.now()?);
+        timer.wait(if until_frame.is_zero() {
+            Duration::from_millis(1)
+        } else {
+            until_frame
+        });
     }
     drop(capture);
     let _ = encoder.finish();
     Ok(())
 }
 
+struct FrameTimer(Option<HANDLE>);
+
+impl FrameTimer {
+    fn new() -> Self {
+        Self(unsafe {
+            CreateWaitableTimerExW(
+                None,
+                PCWSTR::null(),
+                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                TIMER_MODIFY_STATE.0 | SYNCHRONIZATION_SYNCHRONIZE.0,
+            )
+            .ok()
+        })
+    }
+
+    fn wait(&self, delay: Duration) {
+        let due = -(delay.as_nanos().div_ceil(100) as i64);
+        let waited = self.0.is_some_and(|timer| unsafe {
+            SetWaitableTimer(timer, &due, 0, None, None, false).is_ok()
+                && WaitForSingleObject(timer, INFINITE) == WAIT_OBJECT_0
+        });
+        if !waited {
+            thread::sleep(delay);
+        }
+    }
+}
+
+impl Drop for FrameTimer {
+    fn drop(&mut self) {
+        if let Some(timer) = self.0 {
+            unsafe {
+                let _ = CloseHandle(timer);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use windows_capture::window::Window;
+
+    #[test]
+    fn rechaza_historial_congelado() {
+        let last = Duration::from_secs(120);
+        assert!(check_freshness(last, Duration::from_secs(121)).is_ok());
+        assert!(check_freshness(last, Duration::from_secs(129)).is_err());
+    }
+
+    #[test]
+    #[ignore = "Requiere Windows interactivo y más de dos minutos de captura real"]
+    fn historial_sigue_avanzando_despues_de_llenarse() -> Result<()> {
+        let replay = Replay::start(
+            Profile {
+                id: "0".into(),
+                monitor: true,
+                height: 1080,
+                fps: 120,
+                bitrate: 40,
+                seconds: 120,
+                cursor: false,
+            },
+            Default::default(),
+        )?;
+        espera_frames(&replay, 120)?;
+        let first = replay.snapshot()?;
+        thread::sleep(Duration::from_secs(12));
+        let second = replay.snapshot()?;
+        let advance = |a: &Frame, b: &Frame| b.timestamp.saturating_sub(a.timestamp);
+        assert!(advance(&first.samples[0], &second.samples[0]) >= Duration::from_secs(9));
+        assert!(
+            advance(
+                first.samples.last().unwrap(),
+                second.samples.last().unwrap()
+            ) >= Duration::from_secs(11)
+        );
+        Ok(())
+    }
 
     #[test]
     #[ignore = "Requiere una ventana de prueba 4:3 visible en Windows"]

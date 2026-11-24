@@ -87,7 +87,22 @@ section[data-panel]:not([hidden]){animation:panel-in .2s ease-out}
                      :+xx%%####%%%+:.
 
                                                           </pre><div class="identity-caption"><strong>Cut</strong><span>Windows · Rust</span></div><div class="version-line"><span>Versión</span><b>Prototipo de diseño</b></div></aside>
-<div class="preference-controls"><section class="surface"><h2>Comportamiento</h2><label class="field"><span>Iniciar con Windows<small>Abrir Cut al iniciar sesión.</small></span><input id="startup" type="checkbox" role="switch"></label><label class="field"><span>Minimizar al cerrar<small>Al desactivar esta opción, Cut queda en la bandeja.</small></span><input id="minimize-on-close" type="checkbox" role="switch"></label><label class="field"><span>Capturar cursor<small>Al cambiarlo se inicia un replay nuevo.</small></span><input id="capture-cursor" type="checkbox" role="switch"></label></section>
+<div class="preference-controls"><section class="surface"><h2>Comportamiento</h2><label class="field"><span>Iniciar con Windows<small>Abrir Cut al iniciar sesión.</small></span><input id="startup" type="checkbox" role="switch"></label><label class="field"><span>Minimizar al cerrar<small>Al desactivar esta opción, Cut queda en la bandeja.</small></span><input id="minimize-on-close" type="checkbox" role="switch"></label><label class="field"><span>Capturar cursor<small>Al cambiarlo se inicia un replay nuevo.</small></span><input id="capture-cursor" type="checkbox" role="switch"></label>
+<div id="clip-hotkey" hidden>
+  <div class="hotkey-row">
+    <span id="hotkey-label">Atajo para guardar clips</span>
+    <button type="button" id="hotkey-key" aria-labelledby="hotkey-label hotkey-value" aria-describedby="hotkey-feedback" aria-pressed="false"><kbd id="hotkey-value">F9</kbd></button>
+  </div>
+  <div class="hotkey-meta">
+    <output id="hotkey-feedback" aria-live="polite"></output>
+    <button type="button" id="hotkey-reset" hidden>Restaurar F9</button>
+  </div>
+</div>
+<div id="cut-updates" hidden>
+  <button type="button" id="check-updates">Buscar actualizaciones</button>
+  <output id="update-message" aria-live="polite"></output>
+</div>
+</section>
 <section class="surface"><h2>Micrófono global</h2><p>Para todas las capturas nuevas.</p><label class="device">Dispositivo <select class="source"><option>Micrófono predeterminado</option><option>Micrófono USB</option></select></label>
           <div class="volume">
             <label for="global-volume">Volumen de grabación</label><output for="global-volume">100%</output>
@@ -108,9 +123,13 @@ section[data-panel]:not([hidden]){animation:panel-in .2s ease-out}
 <fieldset class="choices"><legend>Fotogramas por segundo</legend><div><label><input type="radio" name="fps" value="30"><span>30 FPS</span></label><label><input type="radio" name="fps" value="60" checked><span>60 FPS</span></label><label><input type="radio" name="fps" value="90"><span>90 FPS</span></label><label><input type="radio" name="fps" value="120"><span>120 FPS</span></label></div></fieldset>
 <fieldset class="choices"><legend>Bitrate</legend><div><label><input type="radio" name="rate" value="10"><span>10 Mb/s</span></label><label><input type="radio" name="rate" value="20" checked><span>20 Mb/s</span></label><label><input type="radio" name="rate" value="40"><span>40 Mb/s</span></label><label><input type="radio" name="rate" value="80"><span>80 Mb/s</span></label></div></fieldset></section></div>
 <section class="surface replay-config"><h2>Duración del replay</h2><div class="clock-face"><output id="summary-time"></output></div>
-<fieldset class="choices"><legend>Tiempo que guarda F9</legend><div><label><input type="radio" name="seconds" value="15"><span>15 s</span></label><label><input type="radio" name="seconds" value="30" checked><span>30 s</span></label><label><input type="radio" name="seconds" value="60"><span>1 min</span></label><label><input type="radio" name="seconds" value="120"><span>2 min</span></label><label><input type="radio" name="seconds" value="300"><span>5 min</span></label></div></fieldset>
+<fieldset class="choices"><legend id="clip-duration-legend">Tiempo que guarda F9</legend><div><label><input type="radio" name="seconds" value="15"><span>15 s</span></label><label><input type="radio" name="seconds" value="30" checked><span>30 s</span></label><label><input type="radio" name="seconds" value="60"><span>1 min</span></label><label><input type="radio" name="seconds" value="120"><span>2 min</span></label><label><input type="radio" name="seconds" value="300"><span>5 min</span></label></div></fieldset>
 <div class="framing"><div class="frame-demo" aria-hidden="true"><i></i><span>→</span><i></i></div><div><strong>Salida 16:9 estirada</strong><small id="dimensions"></small></div></div><small>La imagen 4:3 se ensancha hasta llenar el cuadro.</small><div class="file-stat"><span>Video estimado</span><strong id="estimate"></strong></div><small id="summary-format"></small><small>MP4 · Estimación sin audio</small>
+<div class="clip-destination"><h3>Carpeta de clips</h3><output id="clip-directory"></output>
+<button type="button" id="open-directory">Abrir carpeta</button>
+<button type="button" id="choose-directory">Cambiar…</button></div>
 </section></form></section><output id="feedback" aria-live="polite"></output>
+<button type="button" id="update-available" hidden></button>
 </div>
 </main>
 <script>
@@ -202,8 +221,9 @@ function addTrack([id,name,color,icon]){
   syncTrack(track);
 }
 function updateCount(){
-  const included=[...tracks.values()].filter(t=>t.include.checked).length;
-  $('#count').textContent=included+' de '+tracks.size;
+  const visible=[...tracks.values()].filter(t=>!t.row.hidden);
+  const included=visible.filter(t=>t.include.checked).length;
+  $('#count').textContent=included+' de '+visible.length;
 }
 catalog.slice(0,4).forEach(addTrack);updateCount();
 $('#refresh').onclick=async event=>{
@@ -225,7 +245,7 @@ for(const reset of document.querySelectorAll('[data-reset]')){
   reset.onclick=()=>{const input=document.getElementById(reset.dataset.reset);input.value=100;input.dispatchEvent(new Event('input'));};
 }
 $('#save').onclick=()=>previewSave();
-document.addEventListener('keydown',e=>{if(e.key==='F9'&&!e.repeat){e.preventDefault();previewSave();}});
+document.addEventListener('keydown',e=>{if(!window.cutDesktop&&e.key==='F9'&&!e.repeat){e.preventDefault();previewSave();}});
 
 // Keep the glyphs in body coordinates so the scales travel with each fish.
 const tau=2*Math.PI;

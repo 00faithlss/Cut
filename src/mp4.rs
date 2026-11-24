@@ -2,16 +2,18 @@ use std::{
     fs::{File, OpenOptions},
     io::{self, BufWriter, Read, Seek, SeekFrom, Write},
     path::Path,
-    sync::Arc,
     time::Duration,
 };
 
 use ::mp4::{
     AacConfig, AvcConfig, Bytes, ChannelConfig, Mp4Config, Mp4Sample, Mp4Writer, TrackConfig,
 };
-use win_native_media::encoder::{EncodedSample, ParameterSets, mf_h264::iter_annex_b_nals};
+use win_native_media::encoder::{ParameterSets, mf_h264::iter_annex_b_nals};
 
-use crate::{audio::History, replay::Result};
+use crate::{
+    audio::History,
+    replay::{Result, storage::Frame},
+};
 
 const VIDEO_CLOCK: u32 = 90_000;
 const AUDIO_CLOCK: u32 = 48_000;
@@ -35,7 +37,7 @@ pub fn write(
     path: &Path,
     file: File,
     video: &Video,
-    frames: &[Arc<EncodedSample>],
+    frames: &[Frame],
     tracks: &[History],
 ) -> Result<()> {
     let origin = frames
@@ -98,6 +100,7 @@ pub fn write(
         .collect::<Vec<_>>();
     let blocks = ticks(end - origin, AUDIO_CLOCK).div_ceil(u64::from(AAC_BLOCK));
     let mut block = 0;
+    let mut packet = Vec::new();
     for (index, frame) in frames.iter().enumerate() {
         let relative = frame.timestamp.saturating_sub(origin);
         let start = ticks(relative, VIDEO_CLOCK);
@@ -109,8 +112,9 @@ pub fn write(
         let duration = ticks(next.saturating_sub(origin), VIDEO_CLOCK)
             .saturating_sub(start)
             .max(1);
-        let mut avcc = Vec::with_capacity(frame.data.len());
-        for nalu in iter_annex_b_nals(&frame.data).filter(|nalu| !nalu.is_empty()) {
+        frame.read_into(&mut packet)?;
+        let mut avcc = Vec::with_capacity(packet.len());
+        for nalu in iter_annex_b_nals(&packet).filter(|nalu| !nalu.is_empty()) {
             avcc.extend_from_slice(&u32::try_from(nalu.len())?.to_be_bytes());
             avcc.extend_from_slice(nalu);
         }

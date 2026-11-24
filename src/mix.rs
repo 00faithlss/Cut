@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use win_native_media::audio::aac::AacEncoder;
+use win_native_media::audio::{EncodedAudio, aac::AacEncoder};
 
 use crate::{audio::History, replay::Result};
 
@@ -17,6 +17,7 @@ pub struct Mix {
     encoder: AacEncoder,
     pending: BTreeMap<u64, Box<[i32; FRAMES * 2]>>,
     rendered_until: u64,
+    encoded: Vec<EncodedAudio>,
 }
 
 fn samples_at(time: Duration) -> u64 {
@@ -34,6 +35,7 @@ impl Mix {
             )?,
             pending: BTreeMap::new(),
             rendered_until: 0,
+            encoded: Vec::new(),
         })
     }
 
@@ -96,10 +98,9 @@ impl Mix {
                 pcm[i * 2..i * 2 + 2].copy_from_slice(&(value as i16).to_le_bytes());
             }
             let timestamp = Duration::from_nanos(index * FRAMES as u64 * 1_000_000_000 / RATE);
-            let mut output = Vec::new();
             self.encoder
-                .encode(&pcm[..samples * 2], timestamp, &mut output)?;
-            history.packets.extend(output.into_iter().map(Arc::new));
+                .encode(&pcm[..samples * 2], timestamp, &mut self.encoded)?;
+            history.packets.extend(self.encoded.drain(..).map(Arc::new));
         }
         history.level = (history.level * 0.9).max(f64::from(peak) / 32768.0);
         Ok(())

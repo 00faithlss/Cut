@@ -5,12 +5,11 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::audio::{Settings, Source};
+use crate::audio::Settings;
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct MixerCache {
-    pub apps: Vec<Source>,
     pub settings: Settings,
 }
 
@@ -25,32 +24,11 @@ impl MixerCache {
 
     pub fn load(path: &Path) -> Option<Self> {
         let mut cache: Self = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
-        cache.apps.retain(|app| app.id.starts_with("app:"));
-        cache.apps.sort_by(|a, b| a.id.cmp(&b.id));
-        cache.apps.dedup_by(|a, b| a.id == b.id);
         cache
             .settings
             .tracks
             .retain(|id, _| id == "mic" || id.starts_with("app:"));
         Some(cache)
-    }
-
-    pub fn add_apps(&mut self, apps: impl Iterator<Item = Source>) -> bool {
-        let mut changed = false;
-        for app in apps {
-            match self.apps.binary_search_by(|known| known.id.cmp(&app.id)) {
-                Ok(index) if self.apps[index] != app => {
-                    self.apps[index] = app;
-                    changed = true;
-                }
-                Ok(_) => {}
-                Err(index) => {
-                    self.apps.insert(index, app);
-                    changed = true;
-                }
-            }
-        }
-        changed
     }
 
     pub fn save(&self, path: &Path) -> io::Result<()> {
@@ -69,29 +47,30 @@ mod tests {
     use crate::audio::Gain;
 
     #[test]
-    fn restaura_aplicaciones_y_volumen_sin_duplicarlas() -> io::Result<()> {
+    fn migra_preferencias_del_mezclador_anterior() -> io::Result<()> {
         let path =
             std::env::temp_dir().join(format!("cut-mezclador-prueba-{}.json", std::process::id()));
-        let app = Source {
-            id: "app:vlc".into(),
-            label: "VLC".into(),
-        };
         let mut cache = MixerCache::default();
-        assert!(cache.add_apps([app.clone()].into_iter()));
-        assert!(!cache.add_apps([app.clone()].into_iter()));
         cache.save(&path)?;
         cache.settings.noise_suppression = false;
         cache.settings.tracks.insert(
-            app.id.clone(),
+            "app:vlc".into(),
             Gain {
                 include: false,
                 volume: 72,
             },
         );
-        cache.save(&path)?;
+        let mut legacy = serde_json::to_value(&cache)?;
+        legacy["apps"] = serde_json::json!([{ "id": "app:vlc", "label": "VLC" }]);
+        fs::write(&path, serde_json::to_vec(&legacy)?)?;
         let restored = MixerCache::load(&path).unwrap();
-        assert_eq!(restored.apps, vec![app]);
         assert_eq!(restored.settings, cache.settings);
+        restored.save(&path)?;
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&fs::read(&path)?)?
+                .get("apps")
+                .is_none()
+        );
         fs::remove_file(path)
     }
 }

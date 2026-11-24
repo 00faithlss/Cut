@@ -3,6 +3,7 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
+        mpsc::{Receiver, RecvTimeoutError},
     },
     thread,
     time::{Duration, Instant},
@@ -10,8 +11,8 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use wasapi::{
-    AudioCaptureClient, AudioClient, DeviceEnumerator, Direction, Handle, SampleType, SessionState,
-    StreamMode, WaveFormat,
+    AudioCaptureClient, AudioClient, AudioMeterInformation, AudioSessionControl, DeviceEnumerator,
+    Direction, Handle, SampleType, SessionState, StreamMode, WaveFormat,
 };
 use win_native_media::audio::EncodedAudio;
 use windows::Win32::{
@@ -29,6 +30,8 @@ use crate::replay::Result;
 use crate::{microphone::Microphone, mix::Mix};
 
 const RATE: u32 = 48_000;
+
+pub type SharedSettings = Arc<Mutex<Arc<Settings>>>;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
@@ -70,10 +73,9 @@ pub struct Application {
     pids: Vec<u32>,
 }
 
-#[derive(Default, Serialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Catalog {
     pub devices: Vec<Source>,
-    pub apps: Vec<Application>,
     pub default_microphone: Option<String>,
 }
 
@@ -112,8 +114,7 @@ fn processes() -> HashMap<u32, (u32, String)> {
     list
 }
 
-pub fn discover() -> Result<Catalog> {
-    let enumerator = DeviceEnumerator::new()?;
+fn capture_devices(enumerator: &DeviceEnumerator) -> Catalog {
     let mut found = Catalog {
         default_microphone: enumerator
             .get_default_device(Direction::Capture)
@@ -128,7 +129,10 @@ pub fn discover() -> Result<Catalog> {
             }
         }
     }
-    let mut pids = HashSet::new();
+    found
+}
+
+fn render_sessions(enumerator: &DeviceEnumerator, mut visit: impl FnMut(AudioSessionControl)) {
     if let Ok(speakers) = enumerator.get_device_collection(Direction::Render) {
         for device in (&speakers).into_iter().flatten() {
             let sessions = device
@@ -136,20 +140,62 @@ pub fn discover() -> Result<Catalog> {
                 .and_then(|manager| manager.get_audiosessionenumerator());
             if let Ok(sessions) = sessions {
                 for index in 0..sessions.get_count().unwrap_or(0) {
-                    if let Ok(control) = sessions.get_session(index)
-                        && control.get_state().ok() == Some(SessionState::Active)
-                        && let Ok(pid) = control.get_process_id()
-                        && pid != 0
-                        && pid != std::process::id()
-                    {
-                        pids.insert(pid);
+                    if let Ok(control) = sessions.get_session(index) {
+                        visit(control);
                     }
                 }
             }
         }
     }
-    found.apps = group_processes(&processes(), pids, std::process::id());
-    Ok(found)
+}
+
+fn active_applications(enumerator: &DeviceEnumerator) -> Vec<Application> {
+    let mut pids = HashSet::new();
+    render_sessions(enumerator, |control| {
+        if control.get_state().ok() == Some(SessionState::Active)
+            && let Ok(pid) = control.get_process_id()
+            && pid != 0
+            && pid != std::process::id()
+        {
+            pids.insert(pid);
+        }
+    });
+    if pids.is_empty() {
+        Vec::new()
+    } else {
+        group_processes(&processes(), pids, std::process::id())
+    }
+}
+
+fn application_for(
+    processes: &HashMap<u32, (u32, String)>,
+    pid: u32,
+    own_pid: u32,
+) -> Option<(Source, u32)> {
+    let (_, label) = processes.get(&pid)?;
+    let mut root = pid;
+    let mut current = pid;
+    let mut visited = HashSet::new();
+    while visited.insert(current) {
+        // El WebView y los auxiliares de Cut pertenecen al árbol de la app.
+        if current == own_pid {
+            return None;
+        }
+        let Some((parent, name)) = processes.get(&current) else {
+            break;
+        };
+        if name.eq_ignore_ascii_case(label) {
+            root = current;
+        }
+        current = *parent;
+    }
+    Some((
+        Source {
+            id: format!("app:{}", label.to_lowercase()),
+            label: label.clone(),
+        },
+        root,
+    ))
 }
 
 fn group_processes(
@@ -161,33 +207,13 @@ fn group_processes(
     let mut pids: Vec<_> = pids.into_iter().collect();
     pids.sort_unstable();
     for pid in pids {
-        let Some((_, label)) = processes.get(&pid) else {
+        let Some((source, root)) = application_for(processes, pid, own_pid) else {
             continue;
         };
-        let id = format!("app:{}", label.to_lowercase());
-        let mut root = pid;
-        let mut current = pid;
-        let mut visited = HashSet::new();
-        while visited.insert(current) {
-            let Some((parent, name)) = processes.get(&current) else {
-                break;
-            };
-            if name.eq_ignore_ascii_case(label) {
-                root = current;
-            }
-            current = *parent;
-        }
-        // El WebView y los auxiliares de Cut pertenecen al árbol de la app.
-        if visited.contains(&own_pid) {
-            continue;
-        }
         let app = applications
-            .entry(id.clone())
+            .entry(source.id.clone())
             .or_insert_with(|| Application {
-                source: Source {
-                    id,
-                    label: label.clone(),
-                },
+                source,
                 pids: Vec::new(),
             });
         if !app.pids.contains(&root) {
@@ -197,6 +223,107 @@ fn group_processes(
     let mut apps: Vec<_> = applications.into_values().collect();
     apps.sort_by(|a, b| a.source.id.cmp(&b.source.id));
     apps
+}
+
+#[derive(Default)]
+struct AudibleTracks {
+    last_heard: HashMap<String, Instant>,
+}
+
+impl AudibleTracks {
+    fn update<'a>(
+        &mut self,
+        now: Instant,
+        active: impl IntoIterator<Item = (&'a Source, bool)>,
+    ) -> Vec<Source> {
+        let mut audible = Vec::new();
+        let mut active_ids = HashSet::new();
+        for (source, has_signal) in active {
+            active_ids.insert(source.id.as_str());
+            if has_signal {
+                if let Some(last) = self.last_heard.get_mut(&source.id) {
+                    *last = now;
+                } else {
+                    self.last_heard.insert(source.id.clone(), now);
+                }
+            }
+            audible.push(source);
+        }
+        self.last_heard.retain(|id, last| {
+            active_ids.contains(id.as_str()) && now.duration_since(*last) < Duration::from_secs(3)
+        });
+        audible.retain(|source| self.last_heard.contains_key(&source.id));
+        audible.sort_by(|a, b| a.id.cmp(&b.id));
+        audible.dedup_by(|a, b| a.id == b.id);
+        audible.into_iter().cloned().collect()
+    }
+}
+
+struct RenderMeter {
+    source: Source,
+    control: AudioSessionControl,
+    meter: AudioMeterInformation,
+}
+
+pub fn monitor_mixer(
+    refresh: Receiver<()>,
+    mut devices_changed: impl FnMut(Catalog),
+    mut audible_changed: impl FnMut(Vec<Source>),
+) -> Result<()> {
+    let _apartment = crate::com::Mta::enter()?;
+    let enumerator = DeviceEnumerator::new()?;
+    let mut devices = None;
+    let mut sessions = Vec::<RenderMeter>::new();
+    let mut tracks = AudibleTracks::default();
+    let mut previous = None;
+    let mut refresh_at = Instant::now();
+    loop {
+        let now = Instant::now();
+        if now >= refresh_at {
+            refresh_at = now + Duration::from_secs(2);
+            let catalog = capture_devices(&enumerator);
+            if devices.as_ref() != Some(&catalog) {
+                devices_changed(catalog.clone());
+                devices = Some(catalog);
+            }
+            let processes = processes();
+            sessions.clear();
+            render_sessions(&enumerator, |control| {
+                if let Ok(pid) = control.get_process_id()
+                    && pid != 0
+                    && let Some((source, _)) = application_for(&processes, pid, std::process::id())
+                    && let Ok(meter) = control.get_audiometerinformation()
+                {
+                    sessions.push(RenderMeter {
+                        source,
+                        control,
+                        meter,
+                    });
+                }
+            });
+        }
+        let active = sessions
+            .iter()
+            .filter(|session| session.control.get_state().ok() == Some(SessionState::Active))
+            .map(|session| {
+                let audible = session
+                    .meter
+                    .get_peak_value()
+                    .is_ok_and(|peak| peak >= 0.001);
+                (&session.source, audible)
+            });
+        let audible = tracks.update(now, active);
+        if previous.as_ref() != Some(&audible) {
+            audible_changed(audible.clone());
+            previous = Some(audible);
+        }
+        match refresh.recv_timeout(Duration::from_millis(100)) {
+            Ok(()) => refresh_at = Instant::now(),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -369,6 +496,9 @@ impl Input {
                     continue;
                 };
                 start
+            } else if gain == 100 {
+                output(packet_time, input, self.channels);
+                continue;
             } else {
                 for bytes in input.as_chunks::<2>().0 {
                     let sample = i32::from(i16::from_le_bytes(*bytes));
@@ -413,15 +543,15 @@ pub fn run(
     stop: &AtomicBool,
     clock: &Clock,
     retain: Duration,
-    settings: &Mutex<Settings>,
+    settings: &SharedSettings,
     history: &Tracks,
     notices: &Notices,
 ) -> Result<()> {
-    wasapi::initialize_mta().ok()?;
+    let _apartment = crate::com::Mta::enter()?;
     let mut groups = HashMap::<String, Group>::new();
     let mut sources = Vec::new();
     let mut discover_at = Instant::now();
-    let mut previous = Settings::default();
+    let mut previous = Arc::new(Settings::default());
     let mut mix = Mix::new(2)?;
     let mut mixed = mix.new_history("Mezcla");
     let mut mixed_sources = HashSet::new();
@@ -435,8 +565,8 @@ pub fn run(
         let discovery = Instant::now() >= discover_at;
         if discovery {
             discover_at = Instant::now() + Duration::from_secs(2);
-            if let Ok(catalog) = discover() {
-                sources = catalog.apps;
+            if let Ok(enumerator) = DeviceEnumerator::new() {
+                sources = active_applications(&enumerator);
             }
             if !sources
                 .iter()
@@ -545,7 +675,9 @@ pub fn run(
                     |time, data, channels| {
                         group.mix.add(time, data, channels);
                         mix.add(time, data, channels);
-                        mixed_sources.insert(id.clone());
+                        if !mixed_sources.contains(id) {
+                            mixed_sources.insert(id.clone());
+                        }
                     },
                 ) {
                     Ok(()) => true,
@@ -587,6 +719,36 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn muestra_solo_sesiones_con_audio_y_quita_las_cerradas() {
+        let now = Instant::now();
+        let spotify = Source {
+            id: "app:spotify".into(),
+            label: "Spotify".into(),
+        };
+        let discord = Source {
+            id: "app:discord".into(),
+            label: "Discord".into(),
+        };
+        let mut tracks = AudibleTracks::default();
+        assert_eq!(
+            tracks.update(now, [(&spotify, false), (&discord, true)]),
+            vec![discord.clone()]
+        );
+        assert_eq!(
+            tracks.update(
+                now + Duration::from_secs(1),
+                [(&spotify, true), (&discord, false)]
+            ),
+            vec![discord.clone(), spotify.clone()]
+        );
+        assert_eq!(
+            tracks.update(now + Duration::from_millis(1100), [(&spotify, false)]),
+            vec![spotify]
+        );
+        assert!(tracks.update(now + Duration::from_secs(4), []).is_empty());
+    }
 
     #[test]
     fn agrupa_pestanas_e_instancias_y_excluye_los_auxiliares_de_cut() {

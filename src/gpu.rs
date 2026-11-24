@@ -5,7 +5,6 @@ use std::{
 };
 use win_native_media::{
     VideoConfig,
-    convert::Bgra2Nv12,
     encoder::{EncodedSample, ParameterSets, mf_h264::iter_annex_b_nals},
 };
 use windows::{
@@ -27,10 +26,17 @@ pub struct Encoder {
     events: IMFMediaEventGenerator,
     _manager: IMFDXGIDeviceManager,
     allocator: IMFVideoSampleAllocatorEx,
-    convert: Bgra2Nv12,
+    context: ID3D11DeviceContext,
+    output_info: MFT_OUTPUT_STREAM_INFO,
     requested: u32,
     sample_duration: i64,
     pub parameters: ParameterSets,
+}
+
+pub struct InputFrame {
+    sample: IMFSample,
+    pub texture: ID3D11Texture2D,
+    pub index: u32,
 }
 
 static MEDIA_FOUNDATION: OnceLock<windows::core::Result<()>> = OnceLock::new();
@@ -91,12 +97,14 @@ impl Encoder {
             let events = transform.cast()?;
             transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)?;
             transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)?;
+            let output_info = transform.GetOutputStreamInfo(0)?;
             Ok(Self {
                 transform,
                 events,
                 _manager: manager,
                 allocator,
-                convert: Bgra2Nv12::new(device, config.width, config.height)?,
+                context: device.GetImmediateContext()?,
+                output_info,
                 requested: 0,
                 sample_duration: 10_000_000 / i64::from(config.fps),
                 parameters: ParameterSets::default(),
@@ -157,24 +165,53 @@ impl Encoder {
         Ok(())
     }
 
-    pub fn feed(&mut self, texture: &ID3D11Texture2D, time: Duration) -> Result<()> {
-        if self.requested == 0 {
-            return Ok(());
-        }
+    pub fn accepts_input(&self) -> bool {
+        self.requested > 0
+    }
+
+    pub fn input_frame(&self) -> Result<Option<InputFrame>> {
         unsafe {
-            let sample = self.allocator.AllocateSample()?;
+            let sample = match self.allocator.AllocateSample() {
+                Ok(sample) => sample,
+                Err(error) if error.code() == MF_E_SAMPLEALLOCATOR_EMPTY => return Ok(None),
+                Err(error) => return Err(error.into()),
+            };
             let buffer = sample.GetBufferByIndex(0)?;
-            let dxgi: IMFDXGIBuffer = buffer.cast()?;
-            let mut raw = std::ptr::null_mut();
-            dxgi.GetResource(&ID3D11Texture2D::IID, &mut raw)?;
-            let nv12 = ID3D11Texture2D::from_raw(raw);
-            self.convert
-                .convert_into(texture, &nv12, dxgi.GetSubresourceIndex()?)?;
             let planar: IMF2DBuffer = buffer.cast()?;
             buffer.SetCurrentLength(planar.GetContiguousLength()?)?;
-            sample.SetSampleTime((time.as_nanos() / 100) as i64)?;
-            sample.SetSampleDuration(self.sample_duration)?;
-            self.transform.ProcessInput(0, &sample, 0)?;
+            let dxgi: IMFDXGIBuffer = buffer.cast()?;
+            let index = dxgi.GetSubresourceIndex()?;
+            let mut raw = std::ptr::null_mut();
+            dxgi.GetResource(&ID3D11Texture2D::IID, &mut raw)?;
+            Ok(Some(InputFrame {
+                sample,
+                texture: ID3D11Texture2D::from_raw(raw),
+                index,
+            }))
+        }
+    }
+
+    pub fn repeat(&self, previous: &InputFrame, frame: &InputFrame) {
+        unsafe {
+            self.context.CopySubresourceRegion(
+                &frame.texture,
+                frame.index,
+                0,
+                0,
+                0,
+                &previous.texture,
+                previous.index,
+                None,
+            );
+        }
+    }
+
+    pub fn submit(&mut self, frame: &InputFrame, time: Duration) -> Result<()> {
+        debug_assert!(self.accepts_input());
+        unsafe {
+            frame.sample.SetSampleTime((time.as_nanos() / 100) as i64)?;
+            frame.sample.SetSampleDuration(self.sample_duration)?;
+            self.transform.ProcessInput(0, &frame.sample, 0)?;
             self.requested -= 1;
         }
         Ok(())
@@ -182,7 +219,7 @@ impl Encoder {
 
     unsafe fn read_packet(&mut self, packets: &mut Vec<EncodedSample>) -> Result<()> {
         unsafe {
-            let info = self.transform.GetOutputStreamInfo(0)?;
+            let info = &self.output_info;
             let mut buffer = MFT_OUTPUT_DATA_BUFFER::default();
             if info.dwFlags
                 & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0)
@@ -205,6 +242,7 @@ impl Encoder {
                         &self.transform.GetOutputAvailableType(0, 0)?,
                         0,
                     )?;
+                    self.output_info = self.transform.GetOutputStreamInfo(0)?;
                     return Ok(());
                 }
                 if error.code() == MF_E_TRANSFORM_NEED_MORE_INPUT {

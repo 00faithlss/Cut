@@ -13,6 +13,8 @@ document.addEventListener('DOMContentLoaded', () => {
   cursor.checked = saved('captureCursor') === 'true';
   let active = false;
   let hotkeyRegistered = true;
+  const defaultHotkey = {key:120,modifiers:0};
+  let clipHotkey = defaultHotkey;
   const source = () => option('mode') === 'Monitor completo' ? monitor : game;
   const currentProfile = () => ({
     id: source().value,
@@ -45,11 +47,16 @@ document.addEventListener('DOMContentLoaded', () => {
   profile.elements.mode.value=savedMode==='Ventana del juego'?'Ventana del juego':'Monitor completo';
   updateProfile();
   let paused=false;
+  let restoredSource;
   let requested='';
   let profileTimer;
   let missingSourceTimer;
   function setCaptureProfile(){
-    if(paused || !source().value) return;
+    if(paused){
+      send('select_paused_profile',{profile:source().value?currentProfile():null});
+      return;
+    }
+    if(!source().value) return;
     const settings=currentProfile();
     const signature=JSON.stringify(settings);
     if(requested===signature) return;
@@ -94,9 +101,11 @@ document.addEventListener('DOMContentLoaded', () => {
   };
   for (const tab of document.querySelectorAll('[data-page]')) {
     tab.addEventListener('click', () => {
+      remember('activePanel',tab.dataset.page);
       if (tab.dataset.page === 'clips') send('sources');
     });
   }
+  $('#motion').addEventListener('click',()=>remember('backgroundMotion',String(swimming)));
   const refreshSources = document.createElement('button');
   refreshSources.type = 'button';
   refreshSources.textContent = 'Actualizar fuentes';
@@ -106,12 +115,94 @@ document.addEventListener('DOMContentLoaded', () => {
   $('#monitor-field').firstChild.textContent = 'Pantalla ';
   profile.addEventListener('change', changeSource);
   modePicker.addEventListener('change', changeSource);
+  $('#open-directory').onclick = () => send('open_directory');
+  $('#choose-directory').onclick = () => send('choose_directory');
   $('#save').onclick = () => send('save');
+  const updateButton = $('#update-available');
+  updateButton.onclick=()=>send('open_update');
+  $('#check-updates').onclick=()=>send('check_updates');
+  $('#cut-updates').hidden=false;
+  const hotkeySection = $('#clip-hotkey');
+  const hotkeyKey = $('#hotkey-key');
+  const hotkeyValue = $('#hotkey-value');
+  const hotkeyReset = $('#hotkey-reset');
+  const hotkeyFeedback = $('#hotkey-feedback');
+  let editingHotkey = false;
+  let armedHotkey = false;
+  let pendingHotkey;
+  const keyLabel = key => key >= 112 ? 'F'+(key-111) : String.fromCharCode(key);
+  const modifierNames = [[1,'Ctrl'],[2,'Alt'],[4,'Mayús']];
+  function keyCode(event){
+    if(/^F(?:[1-9]|1[0-9]|2[0-4])$/.test(event.key)) return 111+Number(event.key.slice(1));
+    if(/^Digit[0-9]$/.test(event.code)) return event.code.charCodeAt(5);
+    if(/^[A-Za-z0-9]$/.test(event.key)) return event.key.toUpperCase().charCodeAt(0);
+  }
+  function showHotkey(binding){
+    clipHotkey=binding;
+    const modifiers=modifierNames.filter(([flag])=>binding.modifiers&flag).map(([,name])=>name);
+    const label=[...modifiers,keyLabel(binding.key)].join(' + ');
+    hotkeyValue.textContent=editingHotkey?'…':label;
+    hotkeyKey.setAttribute('aria-pressed',String(editingHotkey));
+    hotkeyReset.hidden=editingHotkey || (binding.key===defaultHotkey.key && !binding.modifiers);
+    $('#save kbd').textContent=label;
+    $('#save').title=hotkeyRegistered ? 'Guardar clip · '+label : label+' disponible con Cut en primer plano';
+    $('#clip-duration-legend').textContent='Tiempo que guarda '+label;
+  }
+  function setHotkeyEditing(editing){
+    editingHotkey=editing;
+    armedHotkey=false;
+    pendingHotkey=undefined;
+    hotkeyFeedback.value=editing?'Pulsa una tecla. Esc cancela.':'';
+    showHotkey(clipHotkey);
+    send('hotkey_edit',{editing});
+  }
+  hotkeyKey.onclick=()=>setHotkeyEditing(!editingHotkey);
+  hotkeyKey.onblur=()=>{
+    if(editingHotkey) setHotkeyEditing(false);
+  };
+  window.addEventListener('blur',()=>{
+    if(editingHotkey) setHotkeyEditing(false);
+  });
+  hotkeyReset.onclick=()=>{
+    hotkeyKey.focus();
+    send('hotkey',{binding:defaultHotkey});
+  };
+  hotkeySection.hidden=false;
   document.addEventListener('keydown', event => {
-    if (event.key !== 'F9' || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    const modifiers=Number(event.ctrlKey)+2*Number(event.altKey)+4*Number(event.shiftKey);
+    const key=keyCode(event);
+    if(editingHotkey){
+      if(event.key==='Tab'){
+        setHotkeyEditing(false);
+        return;
+      }
+      event.stopImmediatePropagation();
+      event.preventDefault();
+      if(event.key==='Escape'){
+        setHotkeyEditing(false);
+        return;
+      }
+      if(!armedHotkey || pendingHotkey || event.repeat || event.isComposing ||
+          ['Control','Alt','Shift','Meta','AltGraph'].includes(event.key)) return;
+      if(!key || event.metaKey || (key<112 && !(modifiers&3))){
+        hotkeyFeedback.value='Usa F1–F24 o combina Ctrl o Alt con una letra o número.';
+        return;
+      }
+      pendingHotkey={key,modifiers,code:event.code || event.key};
+      return;
+    }
+    if(event.metaKey || modifiers!==clipHotkey.modifiers || key!==clipHotkey.key) return;
     event.stopImmediatePropagation();
     event.preventDefault();
     if (!hotkeyRegistered && !event.repeat) send('save');
+  }, true);
+  document.addEventListener('keyup', event => {
+    if(!editingHotkey || pendingHotkey?.code!==(event.code || event.key)) return;
+    event.preventDefault();
+    const {key,modifiers}=pendingHotkey;
+    pendingHotkey=undefined;
+    armedHotkey=false;
+    send('hotkey',{binding:{key,modifiers}});
   }, true);
   $('#startup').addEventListener('change', event => send('startup', {enabled: event.target.checked}));
   const closePreference=$('#minimize-on-close');
@@ -134,12 +225,15 @@ document.addEventListener('DOMContentLoaded', () => {
       device:microphone.value,
       mono:$('#mic-mono').checked,
       noise_suppression:$('#mic-noise-suppression').checked,
-      tracks:Object.fromEntries([...tracks].map(([id,t])=>[id,{include:t.include.checked,volume:+t.gain.value}]))
+      tracks:{
+        ...preferences.tracks,
+        ...Object.fromEntries([...tracks].map(([id,t])=>[id,{include:t.include.checked,volume:+t.gain.value}]))
+      }
     };
   }
   function syncAudio(){
-    const settings=audioSettings();
-    send('audio',{settings});
+    preferences=audioSettings();
+    send('audio',{settings:preferences});
   }
   let preferences={};
   try { preferences=JSON.parse(saved('desktopAudio')) || {}; } catch {}
@@ -184,6 +278,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if(preferences.device) microphone.add(new Option(preferences.device,preferences.device,true,true));
   }
   addNativeTrack('mic','Micrófono',getComputedStyle(app).getPropertyValue('--mic-tint').trim(),'microphone');
+  tracks.get('mic').row.hidden=true;
+  let lastMicSignal=-Infinity;
+  updateCount();
   $('#refresh').onclick=()=>send('audio_sources');
   $('#tracks').addEventListener('input',syncAudio);
   $('#tracks').addEventListener('change',syncAudio);
@@ -203,20 +300,36 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   window.cutDesktop = {
     toggleCapture() { start.click(); },
+    directory(path) { $('#clip-directory').textContent = path; },
     ready(info) {
+      paused=info.paused;
+      restoredSource=info.sourceId;
+      const panel=saved('activePanel');
+      if(panelNames.includes(panel)) openPanel(panel);
+      if(saved('backgroundMotion')!==null){
+        swimming=saved('backgroundMotion')==='true';
+        syncMotion();
+      }
+      window.cutDesktop.directory(info.directory);
       version.textContent = info.version;
       $('#startup').checked = info.startup;
       hotkeyRegistered = info.hotkey;
-      if (!info.hotkey) $('#save').title = 'F9 disponible con Cut en primer plano';
-      if(info.restoreSettings) preferences=info.mixer.settings;
+      showHotkey(info.clipHotkey);
+      if(info.restoreSettings) preferences=info.audioSettings;
       applyAudioPreferences();
-      for(const source of info.mixer.apps) addApplication(source);
       syncAudio();
     },
     sources(list) {
       fill(game,list.windows,'Elige una ventana',saved('captureWindow'));
       fill(monitor,list.monitors,'Elige una pantalla',saved('captureMonitor'));
-      setCaptureProfile();
+      if(restoredSource && [...source().options].some(item=>item.value===restoredSource)) source().value=restoredSource;
+      restoredSource=null;
+      if(!paused && !source().value) {
+        const key=source()===monitor?'captureMonitor':'captureWindow';
+        send('await_source',{profile:currentProfile(),label:saved(key)});
+      } else {
+        setCaptureProfile();
+      }
       if(!active && !paused && !source().value) start.textContent='Elige una ventana';
     },
     audioSources(catalog) {
@@ -228,11 +341,17 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       microphone.replaceChildren(...devices);
       if (devices.some(device=>device.value===before)) microphone.value=before;
-      for(const source of catalog.apps) addApplication(source);
-      const live=new Set(catalog.apps.map(source=>source.id));
+    },
+    audible(sources) {
+      const live=new Set(sources.map(source=>source.id));
       for(const [id,track] of tracks){
-        if(id!=='mic') track.row.classList.toggle('audio-idle',!live.has(id));
+        if(id!=='mic' && !live.has(id)){
+          track.row.remove();
+          tracks.delete(id);
+        }
       }
+      for(const source of sources) addApplication(source);
+      updateCount();
     },
     audioNotices(notices) {
       for(const [id, track] of tracks) {
@@ -243,12 +362,37 @@ document.addEventListener('DOMContentLoaded', () => {
     },
     audioError(message){ feedback.value='No se pudo buscar audio. '+message; },
     levels(levels) {
+      const mic=tracks.get('mic');
+      const now=performance.now();
+      if(mic.include.checked && levels.mic >= 0.001) lastMicSignal=now;
+      const hideMic=!active || !mic.include.checked || now-lastMicSignal >= 3000;
+      if(mic.row.hidden!==hideMic){
+        mic.row.hidden=hideMic;
+        updateCount();
+      }
       for(const [id, track] of tracks){
+        if(track.row.hidden) continue;
         const level=Math.sqrt(levels[id] || 0);
         if(track.level!==level){track.level=level;drawSignal(track);}
       }
     },
     startup(enabled) { $('#startup').checked = enabled; },
+    updateAvailable(update) {
+      updateButton.hidden=!update;
+      updateButton.textContent=update?'Ver actualización '+update.version:'';
+    },
+    updateMessage(message) { $('#update-message').value=message; },
+    hotkey(binding) {
+      editingHotkey=false;
+      armedHotkey=false;
+      showHotkey(binding);
+      hotkeyFeedback.value='';
+    },
+    hotkeyEditing(editing) { armedHotkey=editing && editingHotkey; },
+    hotkeyError(message) {
+      armedHotkey=editingHotkey;
+      hotkeyFeedback.value=message;
+    },
     notice(message) { feedback.value = message; },
     status(state) {
       active = state.active;

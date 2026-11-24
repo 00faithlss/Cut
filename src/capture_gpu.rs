@@ -60,21 +60,24 @@ impl Capture {
         clock: &Clock,
         cursor: Option<&mut Cursor>,
         run: impl FnOnce(&CapturedFrame) -> Result<()>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         match self {
             Self::Monitor(screen) => match screen.acquire_next_frame(0) {
                 Ok(frame) => {
                     if let Some(cursor) = cursor {
                         cursor.update(&frame)?;
+                    } else if frame.frame_info().LastPresentTime == 0 {
+                        return Ok(false);
                     }
                     run(&CapturedFrame {
                         texture: frame.texture().clone(),
                         width: frame.width(),
                         height: frame.height(),
                         timestamp: clock.counter_time(frame.frame_info().LastPresentTime)?,
-                    })
+                    })?;
+                    Ok(true)
                 }
-                Err(Error::Timeout) => Ok(()),
+                Err(Error::Timeout) => Ok(false),
                 Err(error) => Err(error.into()),
             },
             Self::Window(window) => window.with_frame(clock, run),
@@ -132,18 +135,27 @@ impl WindowCapture {
         &mut self,
         clock: &Clock,
         run: impl FnOnce(&CapturedFrame) -> Result<()>,
-    ) -> Result<()> {
-        let frame = match self.pool.TryGetNextFrame() {
+    ) -> Result<bool> {
+        let mut frame = match self.pool.TryGetNextFrame() {
             Ok(frame) => frame,
             Err(error) if error.code().0 == 0 => {
                 self.wait_for_window()?;
-                return Ok(());
+                return Ok(false);
             }
             Err(error) => return Err(error.into()),
         };
+        // Evita codificar el fotograma retrasado si el otro búfer ya tiene uno más reciente.
+        match self.pool.TryGetNextFrame() {
+            Ok(newest) => {
+                frame.Close()?;
+                frame = newest;
+            }
+            Err(error) if error.code().0 == 0 => {}
+            Err(error) => return Err(error.into()),
+        }
         let size = frame.ContentSize()?;
         if size.Width <= 0 || size.Height <= 0 {
-            return Ok(());
+            return Ok(false);
         }
         if (size.Width, size.Height) != (self.size.Width, self.size.Height) {
             frame.Close()?;
@@ -154,7 +166,7 @@ impl WindowCapture {
                 size,
             )?;
             self.size = size;
-            return Ok(());
+            return Ok(false);
         }
         let surface: IDirect3DDxgiInterfaceAccess = frame.Surface()?.cast()?;
         let result = run(&CapturedFrame {
@@ -164,7 +176,7 @@ impl WindowCapture {
             timestamp: clock.hns_time(frame.SystemRelativeTime()?.Duration),
         });
         frame.Close()?;
-        result
+        result.map(|()| true)
     }
 
     fn wait_for_window(&mut self) -> Result<()> {
