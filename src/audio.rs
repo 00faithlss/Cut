@@ -33,12 +33,21 @@ const RATE: u32 = 48_000;
 
 pub type SharedSettings = Arc<Mutex<Arc<Settings>>>;
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipAudio {
+    #[default]
+    Separate,
+    Mixed,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Settings {
     pub device: String,
     pub mono: bool,
     pub noise_suppression: bool,
+    pub clip_audio: ClipAudio,
     pub tracks: HashMap<String, Gain>,
 }
 
@@ -48,6 +57,7 @@ impl Default for Settings {
             device: String::new(),
             mono: true,
             noise_suppression: true,
+            clip_audio: ClipAudio::default(),
             tracks: HashMap::new(),
         }
     }

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1
+
+- Opción para guardar clips con una sola pista de audio mezclada o con la mezcla y pistas separadas por fuente. El cambio se aplica al siguiente clip sin reiniciar la captura.
+
 ## 0.2.0
 
 - Replay móvil con historial de video comprimido en disco. Si se interrumpe la captura de pantalla completa, Cut vuelve a intentarlo y avisa cuando el historial se quedó sin video reciente.

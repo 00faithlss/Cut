@@ -218,6 +218,7 @@ document.addEventListener('DOMContentLoaded', () => {
   tracks.clear();
   $('#tracks').replaceChildren();
   const microphone = $('.source');
+  const clipAudio = $('#clip-audio');
   let nextColor = 0;
   const colors = ['#ffb57f', '#aab4ff', '#87dbaa', '#f1cf79', '#8bcfea'];
   function audioSettings(){
@@ -225,6 +226,7 @@ document.addEventListener('DOMContentLoaded', () => {
       device:microphone.value,
       mono:$('#mic-mono').checked,
       noise_suppression:$('#mic-noise-suppression').checked,
+      clip_audio:clipAudio.value,
       tracks:{
         ...preferences.tracks,
         ...Object.fromEntries([...tracks].map(([id,t])=>[id,{include:t.include.checked,volume:+t.gain.value}]))
@@ -274,6 +276,7 @@ document.addEventListener('DOMContentLoaded', () => {
     updateCount();
     $('#mic-mono').checked=preferences.mono ?? true;
     $('#mic-noise-suppression').checked=preferences.noise_suppression ?? true;
+    clipAudio.value=preferences.clip_audio==='mixed'?'mixed':'separate';
     microphone.replaceChildren(new Option('Micrófono predeterminado',''));
     if(preferences.device) microphone.add(new Option(preferences.device,preferences.device,true,true));
   }
@@ -289,6 +292,11 @@ document.addEventListener('DOMContentLoaded', () => {
   $('#mic-mono').addEventListener('change',syncAudio);
   $('#mic-noise-suppression').addEventListener('change',syncAudio);
   microphone.addEventListener('change',syncAudio);
+  clipAudio.addEventListener('change',event=>{
+    event.stopPropagation();
+    syncAudio();
+  });
+  $('#clip-audio-field').hidden=false;
 
   function fill(select, values, placeholder, preferred) {
     const previous = select.value;

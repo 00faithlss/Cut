@@ -29,6 +29,11 @@ pub struct Video {
     pub parameters: ParameterSets,
 }
 
+pub enum Audio {
+    Separate(Vec<History>),
+    Mixed(Option<History>),
+}
+
 fn ticks(time: Duration, timescale: u32) -> u64 {
     ((time.as_nanos() * u128::from(timescale) + 500_000_000) / 1_000_000_000) as u64
 }
@@ -38,7 +43,7 @@ pub fn write(
     file: File,
     video: &Video,
     frames: &[Frame],
-    tracks: &[History],
+    audio: &Audio,
 ) -> Result<()> {
     let origin = frames
         .first()
@@ -47,20 +52,35 @@ pub fn write(
         .timestamp;
     let end = frames.last().ok_or("Falta video.")?.timestamp
         + Duration::from_nanos(1_000_000_000 / u64::from(video.fps));
-    let mut tracks: Vec<_> = tracks
-        .iter()
-        .filter(|track| {
-            track
-                .packets
+    let silence;
+    let tracks: Vec<_> = match audio {
+        Audio::Mixed(mix) => {
+            silence = History {
+                name: "Mezcla".into(),
+                channels: 2,
+                packets: Default::default(),
+                level: 0.0,
+            };
+            vec![mix.as_ref().unwrap_or(&silence)]
+        }
+        Audio::Separate(history) => {
+            let mut tracks: Vec<_> = history
                 .iter()
-                .any(|packet| (origin..end).contains(&packet.timestamp))
-        })
-        .collect();
-    tracks.sort_by(|a, b| {
-        (a.name != "Mezcla")
-            .cmp(&(b.name != "Mezcla"))
-            .then_with(|| a.name.cmp(&b.name))
-    });
+                .filter(|track| {
+                    track
+                        .packets
+                        .iter()
+                        .any(|packet| (origin..end).contains(&packet.timestamp))
+                })
+                .collect();
+            tracks.sort_by(|a, b| {
+                (a.name != "Mezcla")
+                    .cmp(&(b.name != "Mezcla"))
+                    .then_with(|| a.name.cmp(&b.name))
+            });
+            tracks
+        }
+    };
 
     let brands = [*b"isom", *b"iso2", *b"avc1", *b"mp41"].map(::mp4::FourCC::from);
     let mut mux = Mp4Writer::write_start(

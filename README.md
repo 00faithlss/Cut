@@ -18,7 +18,7 @@ Puedes cambiar el destino en **Clips → Carpeta de clips**. Para reasignar F9, 
 
 - **Video.** Captura una ventana o el monitor completo. Elige entre 720p y 2160p, de 30 a 120 FPS y de 10 a 80 Mb/s. La cadencia real depende de la fuente, la GPU y la carga del equipo. La salida es 16:9 y las fuentes 4:3 se estiran para llenar el cuadro.
 - **Mezclador.** Las aplicaciones aparecen cuando emiten audio y se ocultan al cerrar o tras tres segundos de silencio. Cut recuerda el volumen y si cada pista se incluye en los clips.
-- **Pistas separadas.** El MP4 reproduce la mezcla de forma predeterminada y conserva las pistas AAC incluidas de las aplicaciones y el micrófono. Los controles de micrófono y supresión de ruido están en **Ajustes**.
+- **Pistas de audio.** En **Clips → Pistas de audio**, elige **Una pista (mezcla)** para reunir las fuentes incluidas en una sola pista AAC. **Varias pistas** conserva la mezcla y, además, las pistas de las aplicaciones y el micrófono. Los controles del micrófono están en **Ajustes**.
 
 El replay mantiene el video comprimido en archivos temporales. Dos minutos a 40 Mb/s pueden ocupar unos 600 MB de disco. Cut libera los bloques al salir del historial cuando ninguna exportación los está usando.
 

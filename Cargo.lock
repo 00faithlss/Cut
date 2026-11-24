@@ -325,7 +325,7 @@ dependencies = [
 
 [[package]]
 name = "cut"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "mp4",
  "nnnoiseless",

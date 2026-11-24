@@ -125,6 +125,7 @@ section[data-panel]:not([hidden]){animation:panel-in .2s ease-out}
 <section class="surface replay-config"><h2>Duración del replay</h2><div class="clock-face"><output id="summary-time"></output></div>
 <fieldset class="choices"><legend id="clip-duration-legend">Tiempo que guarda F9</legend><div><label><input type="radio" name="seconds" value="15"><span>15 s</span></label><label><input type="radio" name="seconds" value="30" checked><span>30 s</span></label><label><input type="radio" name="seconds" value="60"><span>1 min</span></label><label><input type="radio" name="seconds" value="120"><span>2 min</span></label><label><input type="radio" name="seconds" value="300"><span>5 min</span></label></div></fieldset>
 <div class="framing"><div class="frame-demo" aria-hidden="true"><i></i><span>→</span><i></i></div><div><strong>Salida 16:9 estirada</strong><small id="dimensions"></small></div></div><small>La imagen 4:3 se ensancha hasta llenar el cuadro.</small><div class="file-stat"><span>Video estimado</span><strong id="estimate"></strong></div><small id="summary-format"></small><small>MP4 · Estimación sin audio</small>
+<label class="field" id="clip-audio-field" hidden>Pistas de audio <select id="clip-audio"><option value="separate">Varias pistas</option><option value="mixed">Una pista (mezcla)</option></select></label>
 <div class="clip-destination"><h3>Carpeta de clips</h3><output id="clip-directory"></output>
 <button type="button" id="open-directory">Abrir carpeta</button>
 <button type="button" id="choose-directory">Cambiar…</button></div>

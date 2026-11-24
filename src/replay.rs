@@ -222,13 +222,19 @@ impl Replay {
             samples: data.frames().cloned().collect(),
             audio: {
                 let settings = self.settings.lock().unwrap();
-                self.audio
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .filter(|(id, _)| settings.tracks.get(*id).is_none_or(|gain| gain.include))
-                    .map(|(_, history)| history.clone())
-                    .collect()
+                let history = self.audio.lock().unwrap();
+                match settings.clip_audio {
+                    audio::ClipAudio::Mixed => mp4::Audio::Mixed(history.get("mix").cloned()),
+                    audio::ClipAudio::Separate => mp4::Audio::Separate(
+                        history
+                            .iter()
+                            .filter(|(id, _)| {
+                                settings.tracks.get(*id).is_none_or(|gain| gain.include)
+                            })
+                            .map(|(_, track)| track.clone())
+                            .collect(),
+                    ),
+                }
             },
         })
     }
@@ -274,7 +280,7 @@ pub struct Snapshot {
     name: String,
     video: mp4::Video,
     samples: Vec<Frame>,
-    audio: Vec<audio::History>,
+    audio: mp4::Audio,
 }
 
 impl Snapshot {
@@ -478,6 +484,69 @@ impl Drop for FrameTimer {
 mod tests {
     use super::*;
     use windows_capture::window::Window;
+
+    #[test]
+    fn exporta_una_pista_mezclada_o_pistas_separadas() -> Result<()> {
+        use win_native_media::audio::EncodedAudio;
+
+        let old: audio::Settings = serde_json::from_str(r#"{"tracks":{}}"#)?;
+        assert_eq!(old.clip_audio, audio::ClipAudio::Separate);
+
+        let mut spool = storage::Writer::default();
+        let frames = [spool.append(EncodedSample {
+            timestamp: Duration::from_secs(1),
+            is_keyframe: true,
+            data: vec![0, 0, 0, 1, 0x65, 0x80],
+        })?];
+        let video = mp4::Video {
+            width: 1280,
+            height: 720,
+            fps: 30,
+            parameters: ParameterSets {
+                sps: vec![0x67, 0x64, 0, 0x1f],
+                pps: vec![0x68, 0xce, 0x3c, 0x80],
+            },
+        };
+        let track = |name: &str| audio::History {
+            name: name.into(),
+            channels: 2,
+            packets: [Arc::new(EncodedAudio {
+                timestamp: Duration::from_secs(1),
+                data: vec![0x21, 0x10, 0x04, 0x60, 0x8c, 0x1c],
+            })]
+            .into(),
+            level: 0.0,
+        };
+        let cases = [
+            (mp4::Audio::Mixed(Some(track("Mezcla"))), 1),
+            (mp4::Audio::Mixed(None), 1),
+            (
+                mp4::Audio::Separate(vec![track("Mezcla"), track("Discord")]),
+                2,
+            ),
+        ];
+        for (index, (audio, expected)) in cases.into_iter().enumerate() {
+            let path = std::env::temp_dir().join(format!(
+                "cut-audio-export-{}-{index}.mp4",
+                std::process::id()
+            ));
+            let result = (|| -> Result<_> {
+                mp4::write(&path, fs::File::create(&path)?, &video, &frames, &audio)?;
+                let file = fs::File::open(&path)?;
+                let len = file.metadata()?.len();
+                let reader = ::mp4::Mp4Reader::read_header(std::io::BufReader::new(file), len)?;
+                let count = reader
+                    .tracks()
+                    .values()
+                    .filter(|track| matches!(track.track_type(), Ok(::mp4::TrackType::Audio)))
+                    .count();
+                Ok(count)
+            })();
+            let _ = fs::remove_file(path);
+            assert_eq!(result?, expected);
+        }
+        Ok(())
+    }
 
     #[test]
     fn rechaza_historial_congelado() {
