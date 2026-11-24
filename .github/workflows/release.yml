@@ -1,0 +1,78 @@
+name: Publicar Cut para Windows
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cut-windows-releases
+  queue: max
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-2025
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: version
+        name: Calcular la próxima versión
+        run: |
+          $published = gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" --paginate --slurp | ConvertFrom-Json -Depth 100
+          if ($LASTEXITCODE) { throw 'No se pudieron consultar los releases.' }
+          $releases = @($published | ForEach-Object { $_ | Where-Object { -not $_.draft -and -not $_.prerelease } })
+          if ($releases | Where-Object target_commitish -eq $env:GITHUB_SHA) {
+            'skip=true' >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
+          if ($LASTEXITCODE) { throw 'No se pudo leer la versión de Cargo.' }
+          $base = [version]($metadata.packages | Where-Object name -eq 'cut').version
+          $last = git tag --list 'v*' | Where-Object { $_ -match '^v[0-9]+\.[0-9]+\.[0-9]+$' } |
+            ForEach-Object { [version]$_.Substring(1) } | Sort-Object -Descending | Select-Object -First 1
+          if ($null -ne $last -and $last -ge $base) {
+            $base = [version]::new($last.Major, $last.Minor, ($last.Build + 1))
+          }
+          $new = $base.ToString(3)
+          ./scripts/set-version.ps1 -Version $new
+          "tag=v$new" >> $env:GITHUB_OUTPUT
+          "version=$new" >> $env:GITHUB_OUTPUT
+      - name: Preparar Windows x64
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          rustup default stable-x86_64-pc-windows-msvc
+          if ($LASTEXITCODE) { throw 'No se pudo preparar Rust.' }
+          if (!(Get-Command ISCC.exe -ErrorAction SilentlyContinue) -and
+              !(Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --yes --no-progress
+            if ($LASTEXITCODE) { throw 'No se pudo instalar Inno Setup.' }
+          }
+      - name: Probar y construir el instalador
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          cargo test --release --locked
+          if ($LASTEXITCODE) { throw 'Fallaron las pruebas de Cut.' }
+          ./scripts/build-installer.ps1
+      - name: Publicar el release
+        if: steps.version.outputs.skip != 'true'
+        env:
+          CUT_TAG: ${{ steps.version.outputs.tag }}
+          CUT_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $file = "target/installer/Cut-$env:CUT_VERSION-Setup-x64.exe"
+          $hash = (Get-FileHash -LiteralPath $file).Hash.ToLowerInvariant()
+          "$hash  $(Split-Path $file -Leaf)" | Set-Content -LiteralPath "$file.sha256" -Encoding ascii
+          gh release create $env:CUT_TAG $file "$file.sha256" --target $env:GITHUB_SHA --title "Cut $env:CUT_VERSION" --generate-notes --latest
+          if ($LASTEXITCODE) { throw 'No se pudo publicar el release.' }
