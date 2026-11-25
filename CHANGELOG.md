@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.2
+
+- Evita capturar dos veces procesos hijos que ya están incluidos en el loopback de su aplicación principal.
+- La mezcla espera los bloques del micrófono que llegan después de otras aplicaciones. La exportación espera al audio pendiente antes de cerrar el MP4.
+- Descarga de actualizaciones desde Cut con progreso y verificación SHA-256. Un solo clic en **Descargar versión** descarga, instala y reinicia la app. Los clips pendientes terminan antes de cerrar Cut.
+
 ## 0.2.1
 
 - Opción para guardar clips con una sola pista de audio mezclada o con la mezcla y pistas separadas por fuente. El cambio se aplica al siguiente clip sin reiniciar la captura.

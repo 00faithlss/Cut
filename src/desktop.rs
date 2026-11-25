@@ -203,6 +203,8 @@ enum Message {
     Hotkey,
     DirectoryPicked(std::result::Result<Option<PathBuf>, String>),
     UpdateChecked(std::result::Result<Option<crate::updates::Update>, String>),
+    DownloadProgress(u64),
+    Downloaded(std::result::Result<crate::updates::Download, String>),
     Saved(std::result::Result<PathBuf, String>),
     AudioDevices(u64, audio::Catalog),
     Audible(u64, Vec<audio::Source>),
@@ -493,6 +495,8 @@ pub fn run() -> Result<()> {
     let mut directory = crate::export_folder::load();
     let mut choosing_directory = false;
     let mut available_update = None;
+    let mut installing_update = false;
+    let mut update_progress = None;
     let mut checking_updates = false;
     let mut report_update = false;
     let mut next_update_check = Instant::now();
@@ -566,6 +570,8 @@ pub fn run() -> Result<()> {
                     "sourceId": last_profile.as_ref().filter(|_| initialized && awaiting_source.is_none()).map(|profile| &profile.id)}));
                 send_sources(&web);
                 update(&web, "updateAvailable", &available_update);
+                update(&web, "updateProgress", update_progress);
+                update(&web, "updateInstalling", installing_update);
                 if let Some(notice) = &latest_save_notice { update(&web, "notice", notice); }
                 if !initialized { window.set_visible(true); }
                 ui_ready = true;
@@ -585,10 +591,46 @@ pub fn run() -> Result<()> {
                 update(&web, "updateMessage", "Buscando actualizaciones…");
             }
             Event::UserEvent(Message::Ui(Command::OpenUpdate)) => {
-                if let Some(release) = &available_update
-                    && let Err(error) = crate::updates::open(release)
+                if !exiting && update_progress.is_none() && !installing_update
+                    && let Some(release) = available_update.clone()
                 {
-                    update(&web, "updateMessage", error.to_string());
+                    update_progress = Some(0u64);
+                    update(&web, "updateProgress", update_progress);
+                    let proxy = event_proxy.clone();
+                    thread::spawn(move || {
+                        let result = crate::updates::download(&release, |percent| {
+                            let _ = proxy.send_event(Message::DownloadProgress(percent));
+                        }).map_err(|error| error.to_string());
+                        let _ = proxy.send_event(Message::Downloaded(result));
+                    });
+                }
+            }
+            Event::UserEvent(Message::DownloadProgress(percent)) => {
+                update_progress = Some(percent);
+                update(&web, "updateProgress", update_progress);
+            }
+            Event::UserEvent(Message::Downloaded(result)) => {
+                match result {
+                    Ok(download) => {
+                        match crate::updates::install(download) {
+                        Ok(()) => {
+                            installing_update = true;
+                            update(&web, "updateInstalling", true);
+                            update(&web, "updateMessage", "Terminando los clips pendientes. Cut se actualizará y volverá a abrirse…");
+                            let _ = event_proxy.send_event(Message::Exit);
+                        }
+                        Err(error) => {
+                            update_progress = None;
+                            update(&web, "updateProgress", update_progress);
+                            update(&web, "updateMessage", error.to_string());
+                        }
+                        }
+                    }
+                    Err(error) => {
+                        update_progress = None;
+                        update(&web, "updateProgress", update_progress);
+                        update(&web, "updateMessage", error);
+                    }
                 }
             }
             Event::UserEvent(Message::UpdateChecked(result)) => {

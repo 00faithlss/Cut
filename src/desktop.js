@@ -119,6 +119,17 @@ document.addEventListener('DOMContentLoaded', () => {
   $('#choose-directory').onclick = () => send('choose_directory');
   $('#save').onclick = () => send('save');
   const updateButton = $('#update-available');
+  let updateInstalling=false;
+  let updateVersion='';
+  let updateProgress=null;
+  function renderUpdate(){
+    updateButton.hidden=!updateVersion;
+    updateButton.disabled=updateInstalling || updateProgress!==null;
+    updateButton.textContent=updateInstalling?'Instalando · Cut se reiniciará':
+      updateProgress!==null?'Descargando actualización · '+updateProgress+' %':
+      'Actualización disponible · Descargar versión '+updateVersion;
+    updateButton.title='Se descargará desde Cut y la app se reiniciará automáticamente al terminar.';
+  }
   updateButton.onclick=()=>send('open_update');
   $('#check-updates').onclick=()=>send('check_updates');
   $('#cut-updates').hidden=false;
@@ -386,9 +397,11 @@ document.addEventListener('DOMContentLoaded', () => {
     },
     startup(enabled) { $('#startup').checked = enabled; },
     updateAvailable(update) {
-      updateButton.hidden=!update;
-      updateButton.textContent=update?'Ver actualización '+update.version:'';
+      updateVersion=update?.version || '';
+      renderUpdate();
     },
+    updateProgress(percent) { updateProgress=percent; renderUpdate(); },
+    updateInstalling(installing) { updateInstalling=installing; renderUpdate(); },
     updateMessage(message) { $('#update-message').value=message; },
     hotkey(binding) {
       editingHotkey=false;

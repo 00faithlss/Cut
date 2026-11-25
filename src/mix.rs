@@ -10,6 +10,7 @@ use crate::{audio::History, replay::Result};
 const RATE: u64 = 48_000;
 const FRAMES: usize = 1024;
 const DELAY_FRAMES: u64 = RATE / 16;
+const MIX_DELAY_FRAMES: u64 = RATE / 5;
 const FRAME_NS: u128 = 1_000_000_000;
 
 pub struct Mix {
@@ -18,6 +19,7 @@ pub struct Mix {
     pending: BTreeMap<u64, Box<[i32; FRAMES * 2]>>,
     rendered_until: u64,
     encoded: Vec<EncodedAudio>,
+    delay_frames: u64,
 }
 
 fn samples_at(time: Duration) -> u64 {
@@ -36,7 +38,15 @@ impl Mix {
             pending: BTreeMap::new(),
             rendered_until: 0,
             encoded: Vec::new(),
+            delay_frames: DELAY_FRAMES,
         })
+    }
+
+    pub fn combined() -> Result<Self> {
+        let mut mix = Self::new(2)?;
+        // Espera al micrófono aunque otra aplicación entregue primero su bloque.
+        mix.delay_frames = MIX_DELAY_FRAMES;
+        Ok(mix)
     }
 
     pub fn new_history(&self, name: &str) -> History {
@@ -81,7 +91,7 @@ impl Mix {
     }
 
     pub fn render(&mut self, time: Duration, history: &mut History) -> Result<()> {
-        let ready = samples_at(time).saturating_sub(DELAY_FRAMES) / FRAMES as u64;
+        let ready = samples_at(time).saturating_sub(self.delay_frames) / FRAMES as u64;
         let mut peak = 0;
         let samples = FRAMES * usize::from(self.channels);
         while self
@@ -103,6 +113,27 @@ impl Mix {
             history.packets.extend(self.encoded.drain(..).map(Arc::new));
         }
         history.level = (history.level * 0.9).max(f64::from(peak) / 32768.0);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mezcla_conserva_microfono_que_llega_despues_del_audio_de_aplicacion() -> Result<()> {
+        let mut mix = Mix::combined()?;
+        let mut history = mix.new_history("Mezcla");
+        let pcm = |value: i16| value.to_le_bytes().repeat(FRAMES * 2);
+        let at = Duration::from_secs(1);
+        mix.add(at, &pcm(100), 2);
+        mix.render(at + Duration::from_millis(110), &mut history)?;
+        mix.add(at, &pcm(200), 2);
+        let first = mix.pending.first_key_value().unwrap().1;
+        assert_eq!(first[(samples_at(at) as usize % FRAMES) * 2], 300);
+        mix.render(at + Duration::from_millis(300), &mut history)?;
+        assert!(mix.pending.is_empty());
         Ok(())
     }
 }

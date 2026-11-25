@@ -230,7 +230,29 @@ fn group_processes(
             app.pids.push(root);
         }
     }
+    // El loopback de un proceso ya incluye sus hijos, incluso si tienen otro nombre.
+    let roots: HashSet<_> = applications
+        .values()
+        .flat_map(|app| app.pids.iter().copied())
+        .collect();
+    for app in applications.values_mut() {
+        app.pids.retain(|pid| {
+            let mut current = *pid;
+            let mut visited = HashSet::new();
+            while visited.insert(current) {
+                let Some((parent, _)) = processes.get(&current) else {
+                    break;
+                };
+                if *parent != *pid && roots.contains(parent) {
+                    return false;
+                }
+                current = *parent;
+            }
+            true
+        });
+    }
     let mut apps: Vec<_> = applications.into_values().collect();
+    apps.retain(|app| !app.pids.is_empty());
     apps.sort_by(|a, b| a.source.id.cmp(&b.source.id));
     apps
 }
@@ -562,7 +584,7 @@ pub fn run(
     let mut sources = Vec::new();
     let mut discover_at = Instant::now();
     let mut previous = Arc::new(Settings::default());
-    let mut mix = Mix::new(2)?;
+    let mut mix = Mix::combined()?;
     let mut mixed = mix.new_history("Mezcla");
     let mut mixed_sources = HashSet::new();
     while !stop.load(Ordering::Relaxed) {
@@ -619,7 +641,7 @@ pub fn run(
         {
             mixed_sources.clear();
             mixed.packets.clear();
-            mix = Mix::new(2)?;
+            mix = Mix::combined()?;
             history.lock().unwrap().remove("mix");
         }
         for app in &sources {
@@ -731,6 +753,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn no_mezcla_dos_veces_el_audio_de_un_hijo_con_otro_nombre() {
+        let tree = HashMap::from([
+            (10, (1, "browser".into())),
+            (11, (10, "renderer".into())),
+            (12, (11, "utility".into())),
+            (20, (1, "Discord".into())),
+        ]);
+        let apps = group_processes(&tree, HashSet::from([10, 11, 12, 20]), 99);
+        let roots: Vec<_> = apps
+            .iter()
+            .flat_map(|app| app.pids.iter().copied())
+            .collect();
+        assert_eq!(roots, vec![10, 20]);
+    }
+
+    #[test]
     fn muestra_solo_sesiones_con_audio_y_quita_las_cerradas() {
         let now = Instant::now();
         let spotify = Source {
@@ -768,7 +806,7 @@ mod tests {
             (12, (0, "vlc".into())),
             (21, (0, "zen".into())),
             (22, (21, "zen".into())),
-            (31, (21, "Spotify".into())),
+            (31, (0, "Spotify".into())),
             (40, (0, "cut".into())),
             (41, (40, "msedgewebview2".into())),
         ]);

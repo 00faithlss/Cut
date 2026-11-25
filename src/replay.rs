@@ -236,6 +236,8 @@ impl Replay {
                     ),
                 }
             },
+            audio_history: Arc::clone(&self.audio),
+            audio_ready_at: std::time::Instant::now() + Duration::from_millis(250),
         })
     }
 
@@ -281,10 +283,41 @@ pub struct Snapshot {
     video: mp4::Video,
     samples: Vec<Frame>,
     audio: mp4::Audio,
+    audio_history: audio::Tracks,
+    audio_ready_at: std::time::Instant,
 }
 
 impl Snapshot {
-    pub fn save(self, directory: &Path) -> Result<PathBuf> {
+    pub fn save(mut self, directory: &Path) -> Result<PathBuf> {
+        // El hilo de exportación espera al audio pendiente del instante en que se pulsó guardar.
+        thread::sleep(
+            self.audio_ready_at
+                .saturating_duration_since(std::time::Instant::now()),
+        );
+        let live = self.audio_history.lock().unwrap();
+        let extend = |track: &mut audio::History| {
+            if let Some(current) = live.values().find(|current| current.name == track.name) {
+                let last = track.packets.back().map(|packet| packet.timestamp);
+                track.packets.extend(
+                    current
+                        .packets
+                        .iter()
+                        .filter(|packet| last.is_none_or(|last| packet.timestamp > last))
+                        .cloned(),
+                );
+            }
+        };
+        match &mut self.audio {
+            mp4::Audio::Mixed(mix) => {
+                if let Some(track) = mix {
+                    extend(track);
+                } else {
+                    *mix = live.get("mix").cloned();
+                }
+            }
+            mp4::Audio::Separate(tracks) => tracks.iter_mut().for_each(extend),
+        }
+        drop(live);
         fs::create_dir_all(directory)?;
         let (temp, file) = clip_name::create_temporary(directory, &self.name)?;
         let result = mp4::write(&temp, file, &self.video, &self.samples, &self.audio)

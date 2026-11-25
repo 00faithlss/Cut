@@ -24,7 +24,7 @@ El replay mantiene el video comprimido en archivos temporales. Dos minutos a 40 
 
 ## Actualizar o salir
 
-Desde la versión 0.2.0, Cut comprueba si hay una versión nueva al iniciar y cada seis horas. También puedes comprobarlo desde **Ajustes → Buscar actualizaciones**. Si aparece **Ver actualización**, abre el release y descarga el instalador.
+Cut comprueba si hay una versión nueva al iniciar y cada seis horas. También puedes comprobarlo desde **Ajustes → Buscar actualizaciones**. Desde 0.2.2, **Actualización disponible → Descargar versión** descarga y verifica el instalador dentro de la app. Al terminar, Cut espera a los clips pendientes, instala la actualización y vuelve a abrirse automáticamente.
 
 Cerrar la ventana deja la captura activa. Para detener Cut por completo antes de actualizar o desinstalar, usa **Salir de Cut** en el menú de la bandeja. La desinstalación conserva los clips y los ajustes del mezclador.
 
