@@ -7,6 +7,7 @@ use windows::{
         DirectX::{Direct3D11::IDirect3DDevice, DirectXPixelFormat},
         SizeInt32,
     },
+    Security::Authorization::AppCapabilityAccess::{AppCapability, AppCapabilityAccessStatus},
     Win32::{
         Foundation::HWND,
         Graphics::Direct3D11::ID3D11Device,
@@ -16,7 +17,7 @@ use windows::{
         },
         UI::WindowsAndMessaging::IsWindow,
     },
-    core::{Interface, factory},
+    core::{HSTRING, Interface, factory},
 };
 use windows_capture::{
     d3d11,
@@ -24,7 +25,7 @@ use windows_capture::{
     monitor::Monitor,
 };
 
-use crate::{audio::Clock, cursor::Cursor, replay::Result};
+use crate::{audio::Clock, compat::Capabilities, cursor::Cursor, replay::Result};
 
 pub enum Capture {
     Monitor(Box<DxgiDuplicationApi>),
@@ -98,6 +99,21 @@ pub struct WindowCapture {
 
 impl WindowCapture {
     fn open(hwnd: HWND, include_cursor: bool) -> Result<Self> {
+        let capabilities = Capabilities::current()?;
+        capabilities.check_window_capture(include_cursor)?;
+        if !GraphicsCaptureSession::IsSupported()? {
+            return Err("Windows no permite capturar ventanas en este equipo o sesión. Prueba con la pantalla completa.".into());
+        }
+        // Sólo consultar: RequestAccessAsync(Borderless) puede abrir un diálogo
+        // de privacidad. Iniciar la grabación no concede ni cambia ese permiso.
+        let access = AppCapability::Create(&HSTRING::from("graphicsCaptureWithoutBorder"))
+            .and_then(|capability| capability.CheckAccess())
+            .map_err(|error| {
+                format!(
+                    "No se pudo comprobar el permiso de captura de ventana sin borde: {error}. Elige la pantalla completa (DXGI) para grabar sin borde amarillo."
+                )
+            })?;
+        require_borderless_access(access)?;
         let (device, _) = d3d11::create_d3d_device()?;
         let winrt = d3d11::create_direct3d_device(&device)?;
         let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
@@ -110,9 +126,26 @@ impl WindowCapture {
             size,
         )?;
         let session = pool.CreateCaptureSession(&item)?;
-        session.SetIsCursorCaptureEnabled(include_cursor)?;
-        // Windows 10 puede mostrar el borde del sistema aunque la captura funcione.
-        let _ = session.SetIsBorderRequired(false);
+        session
+            .SetIsCursorCaptureEnabled(include_cursor)
+            .map_err(|error| {
+                format!("No se pudo aplicar la opción del cursor a la captura de ventana: {error}")
+            })?;
+        // El setter puede tener éxito y ser ignorado sin permiso: comprobarlo
+        // antes de crear la sesión no permite continuar silenciosamente con borde.
+        // Otra aplicación que capture esta ventana puede exigir su propio borde.
+        session.SetIsBorderRequired(false).map_err(|error| {
+            format!(
+                "Windows no permite quitar el borde de esta ventana: {error}. Elige la pantalla completa (DXGI) para grabar sin borde amarillo."
+            )
+        })?;
+        if session.IsBorderRequired().map_err(|error| {
+            format!(
+                "No se pudo verificar la captura de ventana sin borde: {error}. Elige la pantalla completa (DXGI)."
+            )
+        })? {
+            return Err("Windows exige un borde para esta ventana. Elige la pantalla completa (DXGI) para grabar sin borde amarillo.".into());
+        }
         session.StartCapture()?;
         Ok(Self {
             hwnd,
@@ -185,9 +218,37 @@ impl WindowCapture {
     }
 }
 
+fn require_borderless_access(access: AppCapabilityAccessStatus) -> Result<()> {
+    if access != AppCapabilityAccessStatus::Allowed {
+        return Err("Windows no ha autorizado la captura de ventana sin borde. Se requiere el permiso de captura sin borde para Cut; elige la pantalla completa (DXGI) para grabar sin borde amarillo.".into());
+    }
+    Ok(())
+}
+
 impl Drop for WindowCapture {
     fn drop(&mut self) {
         let _ = self.session.Close();
         let _ = self.pool.Close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_confirmed_borderless_permission_allows_window_capture() {
+        assert!(require_borderless_access(AppCapabilityAccessStatus::Allowed).is_ok());
+        for status in [
+            AppCapabilityAccessStatus::DeniedBySystem,
+            AppCapabilityAccessStatus::NotDeclaredByApp,
+            AppCapabilityAccessStatus::DeniedByUser,
+            AppCapabilityAccessStatus::UserPromptRequired,
+            AppCapabilityAccessStatus(-1),
+        ] {
+            let error = require_borderless_access(status).unwrap_err().to_string();
+            assert!(error.contains("permiso"), "{status:?}: {error}");
+            assert!(error.contains("pantalla completa"), "{status:?}: {error}");
+        }
     }
 }

@@ -55,6 +55,23 @@ impl Scaler {
             context.VideoProcessorSetOutputTargetRect(&processor, true, Some(&destination));
             context.VideoProcessorSetStreamDestRect(&processor, 0, true, Some(&destination));
             context.VideoProcessorSetStreamAutoProcessingMode(&processor, 0, false);
+            // Escritorio RGB completo -> NV12 BT.709 limitado. No depender del
+            // rango elegido por el driver: VLC debe recibir el mismo contrato.
+            let rgb = D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
+                _bitfield: 1 | (1 << 2) | (2 << 4),
+            };
+            let yuv = D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
+                _bitfield: 1 | (1 << 2) | (1 << 4),
+            };
+            context.VideoProcessorSetStreamColorSpace(&processor, 0, &rgb);
+            context.VideoProcessorSetOutputColorSpace(
+                &processor,
+                if format == windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12 {
+                    &yuv
+                } else {
+                    &rgb
+                },
+            );
             Ok(Self {
                 gpu: device.clone(),
                 device: video,
@@ -212,5 +229,130 @@ fn rect(width: u32, height: u32) -> RECT {
         top: 0,
         right: width as i32,
         bottom: height as i32,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    #[ignore = "Requiere GPU D3D11 con procesador de video; mide RGB a NV12"]
+    fn convierte_barras_rgb_a_bt709_limitado() -> crate::replay::Result<()> {
+        use windows::Win32::Graphics::Dxgi::Common::{
+            DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12,
+        };
+        let (device, context) = windows_capture::d3d11::create_d3d_device()?;
+        let (w, h) = (1280u32, 720u32);
+        let colors = [
+            [0, 0, 0],
+            [255, 255, 255],
+            [255, 0, 0],
+            [0, 255, 0],
+            [0, 0, 255],
+        ];
+        let mut pixels = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let [r, g, b] = colors[(x / (w / 5)).min(4) as usize];
+                pixels[((y * w + x) * 4) as usize..((y * w + x) * 4 + 4) as usize]
+                    .copy_from_slice(&[b, g, r, 255]);
+            }
+        }
+        let mut source = None;
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: w,
+            Height: h,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_RENDER_TARGET.0) as u32,
+            ..Default::default()
+        };
+        unsafe {
+            device.CreateTexture2D(
+                &desc,
+                Some(&D3D11_SUBRESOURCE_DATA {
+                    pSysMem: pixels.as_ptr().cast(),
+                    SysMemPitch: w * 4,
+                    SysMemSlicePitch: 0,
+                }),
+                Some(&mut source),
+            )?;
+        }
+        let mut scaler = Scaler::new(&device, w, h, 30, DXGI_FORMAT_NV12)?;
+        let mut target = None;
+        unsafe {
+            device
+                .CreateTexture2D(
+                    &D3D11_TEXTURE2D_DESC {
+                        Format: DXGI_FORMAT_NV12,
+                        BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+                        ..desc
+                    },
+                    None,
+                    Some(&mut target),
+                )
+                .map_err(|e| format!("Destino: {e}"))?;
+        }
+        let target = target.unwrap();
+        scaler
+            .stretch_texture(&source.unwrap(), w, h, &target, 0)
+            .map_err(|e| format!("Conversión: {e}"))?;
+        let mut staging = None;
+        unsafe {
+            device.CreateTexture2D(
+                &D3D11_TEXTURE2D_DESC {
+                    Format: DXGI_FORMAT_NV12,
+                    Usage: D3D11_USAGE_STAGING,
+                    BindFlags: 0,
+                    CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                    ..desc
+                },
+                None,
+                Some(&mut staging),
+            )?;
+            let staging = staging.unwrap();
+            context.CopyResource(&staging, &target);
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+            let values: Vec<_> = (0..5)
+                .map(|i| {
+                    *((mapped.pData as *const u8)
+                        .add((h / 2 * mapped.RowPitch + w / 5 * i + w / 10) as usize))
+                })
+                .collect();
+            let chroma: Vec<_> = (0..5)
+                .map(|i| {
+                    let x = (w / 5 * i + w / 10) & !1;
+                    let at = (mapped.RowPitch * (h + h / 4) + x) as usize;
+                    let base = mapped.pData as *const u8;
+                    [*base.add(at), *base.add(at + 1)]
+                })
+                .collect();
+            context.Unmap(&staging, 0);
+            for (got, expected) in values.iter().zip([16i16, 235, 63, 173, 32]) {
+                assert!(
+                    (i16::from(*got) - expected).abs() <= 3,
+                    "Lumas obtenidas {values:?}; esperado BT.709 limitado"
+                );
+            }
+            for (got, expected) in
+                chroma
+                    .iter()
+                    .zip([[128i16, 128], [128, 128], [102, 240], [42, 26], [240, 118]])
+            {
+                assert!(
+                    (i16::from(got[0]) - expected[0]).abs() <= 3
+                        && (i16::from(got[1]) - expected[1]).abs() <= 3,
+                    "Cromas {chroma:?}; esperado BT.709 limitado"
+                );
+            }
+        }
+        Ok(())
     }
 }

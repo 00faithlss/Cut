@@ -1,0 +1,4 @@
+# Link the C runtime into Cut.exe so it starts on PCs without the Visual C++
+# Redistributable (common on Windows 10 LTSC and fresh installs).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

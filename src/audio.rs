@@ -26,10 +26,13 @@ use windows::Win32::{
     },
 };
 
+use crate::compat::{AudioMode, Capabilities};
 use crate::replay::Result;
 use crate::{microphone::Microphone, mix::Mix};
 
 const RATE: u32 = 48_000;
+const SYSTEM_AUDIO_ID: &str = "system";
+const SYSTEM_AUDIO_NOTICE: &str = "Este Windows usa audio del sistema: graba todas las aplicaciones del dispositivo de salida predeterminado. No permite separarlas ni excluirlas individualmente.";
 
 pub type SharedSettings = Arc<Mutex<Arc<Settings>>>;
 
@@ -48,6 +51,7 @@ pub struct Settings {
     pub mono: bool,
     pub noise_suppression: bool,
     pub clip_audio: ClipAudio,
+    pub push_to_talk: Option<crate::hotkey::Binding>,
     pub tracks: HashMap<String, Gain>,
 }
 
@@ -58,8 +62,24 @@ impl Default for Settings {
             mono: true,
             noise_suppression: true,
             clip_audio: ClipAudio::default(),
+            push_to_talk: None,
             tracks: HashMap::new(),
         }
+    }
+}
+
+impl Settings {
+    pub fn gain(&self, id: &str) -> Gain {
+        self.tracks.get(id).copied().unwrap_or(Gain {
+            // El loopback del sistema no puede respetar exclusiones por aplicación.
+            // Exige elegir esta pista antes de volver a incluir esas aplicaciones.
+            include: id != SYSTEM_AUDIO_ID
+                || !self
+                    .tracks
+                    .iter()
+                    .any(|(id, gain)| id.starts_with("app:") && !gain.include),
+            volume: 100,
+        })
     }
 }
 
@@ -159,7 +179,7 @@ fn render_sessions(enumerator: &DeviceEnumerator, mut visit: impl FnMut(AudioSes
     }
 }
 
-fn active_applications(enumerator: &DeviceEnumerator) -> Vec<Application> {
+fn active_applications(enumerator: &DeviceEnumerator, settings: &Settings) -> CapturePlan {
     let mut pids = HashSet::new();
     render_sessions(enumerator, |control| {
         if control.get_state().ok() == Some(SessionState::Active)
@@ -171,9 +191,27 @@ fn active_applications(enumerator: &DeviceEnumerator) -> Vec<Application> {
         }
     });
     if pids.is_empty() {
-        Vec::new()
+        CapturePlan {
+            sources: Vec::new(),
+            blocked: HashMap::new(),
+        }
     } else {
-        group_processes(&processes(), pids, std::process::id())
+        let processes = processes();
+        let sources = group_processes(&processes, pids, std::process::id());
+        capture_plan(&processes, sources, settings)
+    }
+}
+
+fn capture_sources(mode: AudioMode, applications: Vec<Application>) -> Vec<Application> {
+    match mode {
+        AudioMode::Applications => applications,
+        AudioMode::System => vec![Application {
+            source: Source {
+                id: SYSTEM_AUDIO_ID.into(),
+                label: "Audio del sistema".into(),
+            },
+            pids: vec![0],
+        }],
     }
 }
 
@@ -257,6 +295,57 @@ fn group_processes(
     apps
 }
 
+struct CapturePlan {
+    sources: Vec<Application>,
+    blocked: HashMap<String, HashSet<u32>>,
+}
+
+fn capture_plan(
+    processes: &HashMap<u32, (u32, String)>,
+    mut sources: Vec<Application>,
+    settings: &Settings,
+) -> CapturePlan {
+    let mut blocked = HashMap::<String, HashSet<u32>>::new();
+    // INCLUDE_TARGET_PROCESS_TREE cannot subtract an excluded descendant.
+    // Walk excluded processes towards their ancestors once, including dormant
+    // children so opening a new audio stream cannot bypass the preference.
+    let mut unsafe_roots = HashSet::new();
+    for (&pid, (_, name)) in processes {
+        if settings
+            .gain(&format!("app:{}", name.to_lowercase()))
+            .include
+        {
+            continue;
+        }
+        let mut current = pid;
+        let mut visited = HashSet::new();
+        while visited.insert(current) {
+            unsafe_roots.insert(current);
+            let Some((parent, _)) = processes.get(&current) else {
+                break;
+            };
+            current = *parent;
+        }
+    }
+    for source in &mut sources {
+        if !settings.gain(&source.source.id).include {
+            continue;
+        }
+        source.pids.retain(|pid| {
+            if unsafe_roots.contains(pid) {
+                blocked
+                    .entry(source.source.id.clone())
+                    .or_default()
+                    .insert(*pid);
+                false
+            } else {
+                true
+            }
+        });
+    }
+    CapturePlan { sources, blocked }
+}
+
 #[derive(Default)]
 struct AudibleTracks {
     last_heard: HashMap<String, Instant>,
@@ -303,6 +392,7 @@ pub fn monitor_mixer(
     mut audible_changed: impl FnMut(Vec<Source>),
 ) -> Result<()> {
     let _apartment = crate::com::Mta::enter()?;
+    let audio_mode = Capabilities::current()?.audio_mode();
     let enumerator = DeviceEnumerator::new()?;
     let mut devices = None;
     let mut sessions = Vec::<RenderMeter>::new();
@@ -318,21 +408,24 @@ pub fn monitor_mixer(
                 devices_changed(catalog.clone());
                 devices = Some(catalog);
             }
-            let processes = processes();
             sessions.clear();
-            render_sessions(&enumerator, |control| {
-                if let Ok(pid) = control.get_process_id()
-                    && pid != 0
-                    && let Some((source, _)) = application_for(&processes, pid, std::process::id())
-                    && let Ok(meter) = control.get_audiometerinformation()
-                {
-                    sessions.push(RenderMeter {
-                        source,
-                        control,
-                        meter,
-                    });
-                }
-            });
+            if audio_mode == AudioMode::Applications {
+                let processes = processes();
+                render_sessions(&enumerator, |control| {
+                    if let Ok(pid) = control.get_process_id()
+                        && pid != 0
+                        && let Some((source, _)) =
+                            application_for(&processes, pid, std::process::id())
+                        && let Ok(meter) = control.get_audiometerinformation()
+                    {
+                        sessions.push(RenderMeter {
+                            source,
+                            control,
+                            meter,
+                        });
+                    }
+                });
+            }
         }
         let active = sessions
             .iter()
@@ -344,7 +437,16 @@ pub fn monitor_mixer(
                     .is_ok_and(|peak| peak >= 0.001);
                 (&session.source, audible)
             });
-        let audible = tracks.update(now, active);
+        let audible = if audio_mode == AudioMode::System {
+            // Keep the fallback visible before sound starts, so it can be
+            // disabled before it records any application's output.
+            capture_sources(audio_mode, Vec::new())
+                .into_iter()
+                .map(|app| app.source)
+                .collect()
+        } else {
+            tracks.update(now, active)
+        };
         if previous.as_ref() != Some(&audible) {
             audible_changed(audible.clone());
             previous = Some(audible);
@@ -415,7 +517,7 @@ impl Clock {
 struct Input {
     _client: AudioClient,
     capture: AudioCaptureClient,
-    _event: Handle,
+    _event: Option<Handle>,
     channels: u16,
     input_channels: u16,
     microphone: Option<Box<Microphone>>,
@@ -423,20 +525,31 @@ struct Input {
     pcm: Vec<u8>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InputKind {
+    Microphone,
+    System,
+    Application(u32),
+}
+
 impl Input {
-    fn new(pid: Option<u32>, device: &str, mono: bool) -> Result<Self> {
-        let mut client = if let Some(pid) = pid {
-            AudioClient::new_application_loopback_client(pid, true)?
-        } else {
-            let enumerator = DeviceEnumerator::new()?;
-            let source = if device.is_empty() {
-                enumerator.get_default_device(Direction::Capture)?
-            } else {
-                enumerator.get_device(device)?
-            };
-            source.get_iaudioclient()?
+    fn new(kind: InputKind, device: &str, mono: bool) -> Result<Self> {
+        let is_microphone = kind == InputKind::Microphone;
+        let mut client = match kind {
+            InputKind::Application(pid) => AudioClient::new_application_loopback_client(pid, true)?,
+            InputKind::Microphone | InputKind::System => {
+                let enumerator = DeviceEnumerator::new()?;
+                let source = if kind == InputKind::System {
+                    enumerator.get_default_device(Direction::Render)?
+                } else if device.is_empty() {
+                    enumerator.get_default_device(Direction::Capture)?
+                } else {
+                    enumerator.get_device(device)?
+                };
+                source.get_iaudioclient()?
+            }
         };
-        let input_channels = if pid.is_none()
+        let input_channels = if is_microphone
             && client
                 .get_mixformat()
                 .is_ok_and(|format| format.get_nchannels() == 1)
@@ -446,7 +559,7 @@ impl Input {
             2
         };
         let channels = if mono { 1 } else { input_channels };
-        let (bits, sample) = if pid.is_none() {
+        let (bits, sample) = if is_microphone {
             (32, SampleType::Float)
         } else {
             (16, SampleType::Int)
@@ -459,16 +572,25 @@ impl Input {
             input_channels as usize,
             None,
         );
-        client.initialize_client(
-            &format,
-            Direction::Capture,
+        let mode = if kind == InputKind::System {
+            // Polling works with endpoint loopback even on Windows versions
+            // predating event-driven loopback support. The worker already polls.
+            StreamMode::PollingShared {
+                autoconvert: true,
+                buffer_duration_hns: 1_000_000,
+            }
+        } else {
             StreamMode::EventsShared {
                 autoconvert: true,
                 buffer_duration_hns: 0,
-            },
-            None,
-        )?;
-        let event = client.set_get_eventhandle()?;
+            }
+        };
+        client.initialize_client(&format, Direction::Capture, mode, None)?;
+        let event = if kind == InputKind::System {
+            None
+        } else {
+            Some(client.set_get_eventhandle()?)
+        };
         let capture = client.get_audiocaptureclient()?;
         client.start_stream()?;
         Ok(Self {
@@ -477,7 +599,7 @@ impl Input {
             _event: event,
             channels,
             input_channels,
-            microphone: pid.is_none().then(|| Box::new(Microphone::new(channels))),
+            microphone: is_microphone.then(|| Box::new(Microphone::new(channels))),
             staging: Vec::new(),
             pcm: Vec::new(),
         })
@@ -515,6 +637,10 @@ impl Input {
                 clock.relative(info.timestamp)
             };
             self.pcm.clear();
+            // Keep closed-gate voice out of the noise suppressor's delayed samples too.
+            if self.microphone.is_some() && !crate::hotkey::talk_open() {
+                self.staging[..frames as usize * input_width].fill(0);
+            }
             let input = &self.staging[..frames as usize * input_width];
             let start = if let Some(mic) = &mut self.microphone {
                 let Some(start) = mic.process(
@@ -541,6 +667,9 @@ impl Input {
                 }
                 packet_time
             };
+            if self.microphone.is_some() && !crate::hotkey::talk_open() {
+                self.pcm.fill(0);
+            }
             output(start, &self.pcm, self.channels);
         }
         Ok(())
@@ -580,13 +709,16 @@ pub fn run(
     notices: &Notices,
 ) -> Result<()> {
     let _apartment = crate::com::Mta::enter()?;
+    let audio_mode = Capabilities::current()?.audio_mode();
     let mut groups = HashMap::<String, Group>::new();
     let mut sources = Vec::new();
     let mut discover_at = Instant::now();
     let mut previous = Arc::new(Settings::default());
     let mut mix = Mix::combined()?;
     let mut mixed = mix.new_history("Mezcla");
-    let mut mixed_sources = HashSet::new();
+    let mut mixed_sources: HashSet<String> = HashSet::new();
+    let mut blocked_sources = HashMap::<String, HashSet<u32>>::new();
+    let mut output_device = None;
     while !stop.load(Ordering::Relaxed) {
         let preferences = settings.lock().unwrap().clone();
         if preferences.device != previous.device || preferences.mono != previous.mono {
@@ -594,11 +726,48 @@ pub fn run(
             history.lock().unwrap().remove("mic");
             notices.lock().unwrap().remove("mic");
         }
-        let discovery = Instant::now() >= discover_at;
+        let exclusions_changed = preferences
+            .tracks
+            .keys()
+            .chain(previous.tracks.keys())
+            .any(|id| preferences.gain(id).include != previous.gain(id).include);
+        let discovery = Instant::now() >= discover_at || exclusions_changed;
+        let mut newly_blocked = HashSet::new();
         if discovery {
             discover_at = Instant::now() + Duration::from_secs(2);
             if let Ok(enumerator) = DeviceEnumerator::new() {
-                sources = active_applications(&enumerator);
+                let applications = if audio_mode == AudioMode::Applications {
+                    let plan = active_applications(&enumerator, &preferences);
+                    for (id, roots) in &plan.blocked {
+                        if roots.iter().any(|pid| {
+                            !blocked_sources.get(id).is_some_and(|old| old.contains(pid))
+                        }) {
+                            newly_blocked.insert(id.clone());
+                        }
+                    }
+                    let mut current = notices.lock().unwrap();
+                    for id in blocked_sources.keys() {
+                        if !plan.blocked.contains_key(id) {
+                            current.remove(id);
+                        }
+                    }
+                    for id in plan.blocked.keys() {
+                        current.insert(id.clone(), "No se graba este árbol de procesos porque contiene una aplicación excluida. Windows captura el árbol completo. Activa la aplicación excluida para volver a grabar este árbol.".into());
+                    }
+                    blocked_sources = plan.blocked;
+                    plan.sources
+                } else {
+                    let current_output = enumerator
+                        .get_default_device(Direction::Render)
+                        .and_then(|device| device.get_id())
+                        .ok();
+                    if current_output != output_device {
+                        groups.remove(SYSTEM_AUDIO_ID);
+                        output_device = current_output;
+                    }
+                    Vec::new()
+                };
+                sources = capture_sources(audio_mode, applications);
             }
             if !sources
                 .iter()
@@ -616,8 +785,11 @@ pub fn run(
         let reconcile = discovery || !Arc::ptr_eq(&preferences, &previous);
         if reconcile {
             groups.retain(|id, _| {
-                sources.iter().any(|app| &app.source.id == id)
-                    && preferences.tracks.get(id).is_none_or(|gain| gain.include)
+                sources
+                    .iter()
+                    .any(|app| &app.source.id == id && !app.pids.is_empty())
+                    && preferences.gain(id).include
+                    && !newly_blocked.contains(id)
             });
             let cutoff = clock.now()?.saturating_sub(retain + Duration::from_secs(3));
             let mut all = history.lock().unwrap();
@@ -632,14 +804,15 @@ pub fn run(
                 {
                     track.packets.pop_front();
                 }
-                preferences.tracks.get(id).is_none_or(|gain| gain.include)
+                !newly_blocked.contains(id)
+                    && preferences.gain(id).include
                     && (id == "mix" || groups.contains_key(id) || !track.packets.is_empty())
             });
         }
         if reconcile
             && mixed_sources
                 .iter()
-                .any(|id| preferences.tracks.get(id).is_some_and(|gain| !gain.include))
+                .any(|id| !preferences.gain(id).include || newly_blocked.contains(id))
         {
             mixed_sources.clear();
             mixed.packets.clear();
@@ -648,19 +821,28 @@ pub fn run(
         }
         for app in &sources {
             let Source { id, label } = &app.source;
-            let gain = preferences.tracks.get(id).copied().unwrap_or(Gain {
-                include: true,
-                volume: 100,
-            });
+            let gain = preferences.gain(id);
+            let is_system = id == SYSTEM_AUDIO_ID;
             if !gain.include {
                 if reconcile {
-                    notices.lock().unwrap().remove(id);
+                    if is_system {
+                        let message = if preferences.tracks.contains_key(SYSTEM_AUDIO_ID) {
+                            SYSTEM_AUDIO_NOTICE.to_owned()
+                        } else {
+                            format!(
+                                "{SYSTEM_AUDIO_NOTICE} Para conservar tus exclusiones previas, está desactivado. Activa Audio del sistema si quieres grabar todas las aplicaciones."
+                            )
+                        };
+                        notices.lock().unwrap().insert(id.clone(), message);
+                    } else {
+                        notices.lock().unwrap().remove(id);
+                    }
                 }
                 continue;
             }
             let is_mic = id == "mic";
             if discovery
-                || !previous.tracks.get(id).is_none_or(|gain| gain.include)
+                || !previous.gain(id).include
                 || (is_mic
                     && (preferences.device != previous.device || preferences.mono != previous.mono))
             {
@@ -675,17 +857,21 @@ pub fn run(
                     {
                         continue;
                     }
-                    let input = match Input::new(
-                        (pid != 0).then_some(pid),
-                        &preferences.device,
-                        is_mic && preferences.mono,
-                    ) {
-                        Ok(input) => input,
-                        Err(error) => {
-                            last_error = Some(error.to_string());
-                            continue;
-                        }
+                    let kind = if is_mic {
+                        InputKind::Microphone
+                    } else if is_system {
+                        InputKind::System
+                    } else {
+                        InputKind::Application(pid)
                     };
+                    let input =
+                        match Input::new(kind, &preferences.device, is_mic && preferences.mono) {
+                            Ok(input) => input,
+                            Err(error) => {
+                                last_error = Some(error.to_string());
+                                continue;
+                            }
+                        };
                     if let Some(group) = groups.get_mut(id) {
                         group.inputs.insert(pid, input);
                     } else {
@@ -694,7 +880,11 @@ pub fn run(
                 }
                 let mut current = notices.lock().unwrap();
                 if groups.get(id).is_some_and(|group| !group.inputs.is_empty()) {
-                    current.remove(id);
+                    if is_system {
+                        current.insert(id.clone(), SYSTEM_AUDIO_NOTICE.into());
+                    } else if !blocked_sources.contains_key(id) {
+                        current.remove(id);
+                    }
                 } else if let Some(error) = last_error {
                     current.insert(id.clone(), error);
                 }
@@ -757,6 +947,85 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "Requiere un dispositivo de salida WASAPI en Windows"]
+    fn abre_loopback_del_sistema_sin_procesarlo_como_microfono() -> Result<()> {
+        let _apartment = crate::com::Mta::enter()?;
+        let clock = Clock::new()?;
+        let mut input = Input::new(InputKind::System, "", false)?;
+        assert_eq!(input.channels, 2);
+        assert!(input.microphone.is_none());
+        for _ in 0..5 {
+            input.read(&clock, 100, false, |_, data, channels| {
+                assert_eq!(channels, 2);
+                assert_eq!(data.len() % 4, 0);
+            })?;
+            thread::sleep(Duration::from_millis(12));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn windows_antiguo_captura_el_sistema_una_vez_y_no_duplica_las_aplicaciones() {
+        let applications = vec![Application {
+            source: Source {
+                id: "app:game".into(),
+                label: "Game".into(),
+            },
+            pids: vec![42],
+        }];
+        let sources = capture_sources(AudioMode::System, applications);
+        let ids: Vec<_> = sources.iter().map(|app| app.source.id.as_str()).collect();
+        assert_eq!(ids, vec!["system"]);
+        assert_eq!(sources[0].source.label, "Audio del sistema");
+        assert_eq!(sources[0].pids, vec![0]);
+        assert_eq!(capture_sources(AudioMode::System, Vec::new()).len(), 1);
+    }
+
+    #[test]
+    fn windows_moderno_conserva_las_pistas_por_aplicacion_sin_pista_del_sistema() {
+        let applications = vec![Application {
+            source: Source {
+                id: "app:game".into(),
+                label: "Game".into(),
+            },
+            pids: vec![42],
+        }];
+        let sources = capture_sources(AudioMode::Applications, applications);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].source.id, "app:game");
+        assert_eq!(sources[0].pids, vec![42]);
+    }
+
+    #[test]
+    fn el_fallback_no_incluye_en_secreto_aplicaciones_excluidas_antes() {
+        let mut settings = Settings::default();
+        assert!(settings.gain("system").include);
+        settings.tracks.insert(
+            "app:private".into(),
+            Gain {
+                include: false,
+                volume: 100,
+            },
+        );
+        assert!(!settings.gain("system").include);
+        assert!(settings.gain("mic").include);
+        settings.tracks.insert(
+            "system".into(),
+            Gain {
+                include: true,
+                volume: 80,
+            },
+        );
+        assert_eq!(
+            settings.gain("system"),
+            Gain {
+                include: true,
+                volume: 80
+            }
+        );
+    }
+
+    #[test]
     fn no_mezcla_dos_veces_el_audio_de_un_hijo_con_otro_nombre() {
         let tree = HashMap::from([
             (10, (1, "browser".into())),
@@ -770,6 +1039,121 @@ mod tests {
             .flat_map(|app| app.pids.iter().copied())
             .collect();
         assert_eq!(roots, vec![10, 20]);
+    }
+
+    // Each fixture is the PCM returned by a Windows process-tree capture:
+    // browser(10) includes its renderer(11), while player(20) is independent.
+    fn render_capture_plan(sources: &[Application], settings: &Settings) -> Result<History> {
+        let mut mix = Mix::combined()?;
+        let mut output = mix.new_history("Prueba de captura");
+        for source in sources {
+            if !settings.gain(&source.source.id).include {
+                continue;
+            }
+            for pid in &source.pids {
+                let value: i16 = match pid {
+                    0 => 4000,  // endpoint loopback already contains all apps
+                    10 => 4000, // browser(1000) + renderer(3000)
+                    11 => 3000,
+                    20 => 2000,
+                    30 => 500, // independent browser instance
+                    _ => panic!("PID sin señal de prueba: {pid}"),
+                };
+                mix.add(
+                    Duration::ZERO,
+                    &value.to_le_bytes().repeat(1024 * 16 * 2),
+                    2,
+                );
+            }
+        }
+        mix.render(Duration::from_secs(1), &mut output)?;
+        Ok(output)
+    }
+
+    #[test]
+    fn la_senal_del_hijo_entra_una_vez_en_la_mezcla_del_arbol() -> Result<()> {
+        let tree = HashMap::from([
+            (10, (1, "browser".into())),
+            (11, (10, "renderer".into())),
+            (20, (1, "player".into())),
+        ]);
+        let sources = group_processes(&tree, HashSet::from([10, 11, 20]), 99);
+        let output = render_capture_plan(&sources, &Settings::default())?;
+        // 1000 + 3000 + 2000; capturing renderer again would produce 9000.
+        assert_eq!(output.level, 6000.0 / 32768.0);
+        assert!(!output.packets.is_empty(), "Falta la salida AAC real");
+        Ok(())
+    }
+
+    #[test]
+    fn el_loopback_del_sistema_no_suma_tambien_el_loopback_de_aplicacion() -> Result<()> {
+        let applications = vec![Application {
+            source: Source {
+                id: "app:browser".into(),
+                label: "Browser".into(),
+            },
+            pids: vec![10],
+        }];
+        let sources = capture_sources(AudioMode::System, applications);
+        let output = render_capture_plan(&sources, &Settings::default())?;
+        assert_eq!(output.level, 4000.0 / 32768.0);
+        assert!(!output.packets.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn excluir_un_hijo_impide_que_su_senal_entre_por_el_padre() -> Result<()> {
+        let tree = HashMap::from([
+            (10, (1, "browser".into())),
+            (11, (10, "renderer".into())),
+            (20, (1, "player".into())),
+        ]);
+        let mut settings = Settings::default();
+        settings.tracks.insert(
+            "app:renderer".into(),
+            Gain {
+                include: false,
+                volume: 100,
+            },
+        );
+        let sources = group_processes(&tree, HashSet::from([10, 11, 20]), 99);
+        let plan = capture_plan(&tree, sources, &settings);
+        let output = render_capture_plan(&plan.sources, &settings)?;
+        // Windows cannot subtract one child from an INCLUDE tree, so only
+        // the independent player(2000) is safe to capture.
+        assert_eq!(output.level, 2000.0 / 32768.0);
+        assert!(
+            !output.packets.is_empty(),
+            "Se perdió la aplicación independiente"
+        );
+        assert!(plan.blocked.contains_key("app:browser"));
+        Ok(())
+    }
+
+    #[test]
+    fn exclusion_de_hijo_sin_sesion_conserva_la_instancia_independiente() -> Result<()> {
+        let tree = HashMap::from([
+            (10, (1, "browser".into())),
+            (11, (10, "renderer".into())),
+            (20, (1, "player".into())),
+            (30, (1, "browser".into())),
+        ]);
+        let mut settings = Settings::default();
+        settings.tracks.insert(
+            "app:renderer".into(),
+            Gain {
+                include: false,
+                volume: 100,
+            },
+        );
+        // renderer(11) has no active audio session yet; its existing process
+        // can start playing before the next discovery interval.
+        let sources = group_processes(&tree, HashSet::from([10, 20, 30]), 99);
+        let plan = capture_plan(&tree, sources, &settings);
+        let output = render_capture_plan(&plan.sources, &settings)?;
+        assert_eq!(output.level, 2500.0 / 32768.0);
+        assert!(!output.packets.is_empty());
+        Ok(())
     }
 
     #[test]

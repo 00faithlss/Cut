@@ -141,9 +141,14 @@ document.addEventListener('DOMContentLoaded', () => {
   let editingHotkey = false;
   let armedHotkey = false;
   let pendingHotkey;
-  const keyLabel = key => key >= 112 ? 'F'+(key-111) : String.fromCharCode(key);
+  const numpadKeys = {NumpadEnter:14,NumpadMultiply:106,NumpadAdd:107,NumpadSubtract:109,NumpadDecimal:110,NumpadDivide:111};
+  const numpadLabels = {14:'Num Enter',106:'Num ×',107:'Num +',109:'Num −',110:'Num .',111:'Num /'};
+  const isNumpad = key => (key>=96 && key<=105) || Object.hasOwn(numpadLabels,key);
+  const keyLabel = key => numpadLabels[key] || (key>=96 && key<=105 ? 'Num '+(key-96) : key >= 112 ? 'F'+(key-111) : String.fromCharCode(key));
   const modifierNames = [[1,'Ctrl'],[2,'Alt'],[4,'Mayús']];
   function keyCode(event){
+    if(/^Numpad[0-9]$/.test(event.code)) return 96+Number(event.code.slice(6));
+    if(Object.hasOwn(numpadKeys,event.code)) return numpadKeys[event.code];
     if(/^F(?:[1-9]|1[0-9]|2[0-4])$/.test(event.key)) return 111+Number(event.key.slice(1));
     if(/^Digit[0-9]$/.test(event.code)) return event.code.charCodeAt(5);
     if(/^[A-Za-z0-9]$/.test(event.key)) return event.key.toUpperCase().charCodeAt(0);
@@ -195,8 +200,8 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       if(!armedHotkey || pendingHotkey || event.repeat || event.isComposing ||
           ['Control','Alt','Shift','Meta','AltGraph'].includes(event.key)) return;
-      if(!key || event.metaKey || (key<112 && !(modifiers&3))){
-        hotkeyFeedback.value='Usa F1–F24 o combina Ctrl o Alt con una letra o número.';
+      if(!key || event.metaKey || (key<112 && !isNumpad(key) && !(modifiers&3))){
+        hotkeyFeedback.value='Usa F1–F24, una tecla del numpad o Ctrl/Alt con una letra o número.';
         return;
       }
       pendingHotkey={key,modifiers,code:event.code || event.key};
@@ -238,6 +243,7 @@ document.addEventListener('DOMContentLoaded', () => {
       mono:$('#mic-mono').checked,
       noise_suppression:$('#mic-noise-suppression').checked,
       clip_audio:clipAudio.value,
+      push_to_talk:preferences.push_to_talk ?? null,
       tracks:{
         ...preferences.tracks,
         ...Object.fromEntries([...tracks].map(([id,t])=>[id,{include:t.include.checked,volume:+t.gain.value}]))

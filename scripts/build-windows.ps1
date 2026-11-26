@@ -15,26 +15,15 @@ if (!$cargo) {
     if (!(Test-Path -LiteralPath $cargoPath)) { throw 'Instala Rust mediante rustup.' }
     $cargo = Get-Command $cargoPath
 }
-$toolRoot = Join-Path $env:LOCALAPPDATA 'CutClipper/build-tools/mingw64/bin'
-$previousPath = $env:Path
-if (Test-Path -LiteralPath $toolRoot) { $env:Path = "$toolRoot;$env:Path" }
 
+# rust-toolchain.toml selects the MSVC toolchain that GPUI needs.
 Push-Location $root
 try {
     $buildOptions = @('build', '--locked', '--target-dir', $TargetDirectory)
     if ($Release) { $buildOptions += '--release' }
     & $cargo.Source @buildOptions
     if ($LASTEXITCODE -ne 0) { throw "Falló la compilación de Cut ($LASTEXITCODE)." }
-
-    $output = Join-Path $TargetDirectory $profile
-    $loader = Get-ChildItem (Join-Path $output 'build') -Recurse -File -Filter 'WebView2Loader.dll' |
-        Where-Object { $_.Directory.Name -eq 'x64' } |
-        Sort-Object LastWriteTime -Descending |
-        Select-Object -First 1
-    if (!$loader) { throw 'No se encontró WebView2Loader.dll en los artefactos de compilación.' }
-    Copy-Item -LiteralPath $loader.FullName -Destination $output
-    Get-Item -LiteralPath (Join-Path $output 'cut.exe')
+    Get-Item -LiteralPath (Join-Path (Join-Path $TargetDirectory $profile) 'Cut.exe')
 } finally {
     Pop-Location
-    $env:Path = $previousPath
 }

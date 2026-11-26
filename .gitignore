@@ -3,3 +3,8 @@ obj/
 .vs/
 *.user
 /target/
+/experiments/gpui-studio/target/
+
+/.impeccable/
+/Claude outputs/
+/%SystemDrive%/

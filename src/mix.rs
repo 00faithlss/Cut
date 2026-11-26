@@ -146,15 +146,73 @@ mod tests {
     fn mezcla_conserva_microfono_que_llega_despues_del_audio_de_aplicacion() -> Result<()> {
         let mut mix = Mix::combined()?;
         let mut history = mix.new_history("Mezcla");
-        let pcm = |value: i16| value.to_le_bytes().repeat(FRAMES * 2);
+        let pcm = 1000i16.to_le_bytes().repeat(FRAMES * 16 * 2);
         let at = Duration::from_secs(1);
-        mix.add(at, &pcm(100), 2);
+        mix.add(at, &pcm, 2);
         mix.render(at + Duration::from_millis(110), &mut history)?;
-        mix.add(at, &pcm(200), 2);
-        let first = mix.pending.first_key_value().unwrap().1;
-        assert_eq!(first[(samples_at(at) as usize % FRAMES) * 2], 300);
-        mix.render(at + Duration::from_millis(300), &mut history)?;
+
+        let mut microphone = crate::microphone::Microphone::new(1);
+        let input = (2000.0f32 / 32768.0).to_le_bytes().repeat(480 * 8);
+        for block in 0..4 {
+            let mut voice = Vec::new();
+            let timestamp = microphone
+                .process(
+                    &input,
+                    1,
+                    at + Duration::from_millis(block * 80),
+                    100,
+                    false,
+                    &mut voice,
+                )
+                .expect("Falta el bloque de micrófono");
+            mix.add(timestamp, &voice, 1);
+        }
+        mix.render(at + Duration::from_secs(1), &mut history)?;
+        // Each source contributes once: a duplicated application would be
+        // 4000, and duplicated microphone blocks would be 5000.
+        assert_eq!(history.level, 3000.0 / 32768.0);
+        assert!(!history.packets.is_empty(), "Falta audio AAC codificado");
+        assert!(
+            history
+                .packets
+                .iter()
+                .zip(history.packets.iter().skip(1))
+                .all(|(first, next)| first.timestamp < next.timestamp)
+        );
         assert!(mix.pending.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn una_fuente_estereo_no_se_duplica_al_cruzar_bloques_aac() -> Result<()> {
+        let mut mix = Mix::combined()?;
+        let mut output = mix.new_history("Una fuente");
+        let frame = [1200i16.to_le_bytes(), (-2300i16).to_le_bytes()].concat();
+        let pcm = frame.repeat(FRAMES * 16);
+        // 7 ms deliberately splits both incoming packets across AAC blocks.
+        mix.add(Duration::from_millis(7), &pcm[..777 * 4], 2);
+        mix.add(
+            Duration::from_nanos(7_000_000 + 777 * 1_000_000_000 / 48_000 + 1),
+            &pcm[777 * 4..],
+            2,
+        );
+        mix.render(Duration::from_secs(1), &mut output)?;
+        assert_eq!(output.level, 2300.0 / 32768.0);
+        assert!(!output.packets.is_empty(), "Falta audio AAC codificado");
+        assert!(
+            output
+                .packets
+                .iter()
+                .zip(output.packets.iter().skip(1))
+                .all(|(first, next)| first.timestamp < next.timestamp)
+        );
+        let count = output.packets.len();
+        mix.render(Duration::from_secs(2), &mut output)?;
+        assert_eq!(
+            output.packets.len(),
+            count,
+            "Se repitió audio ya renderizado"
+        );
         Ok(())
     }
 }

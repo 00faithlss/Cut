@@ -46,112 +46,112 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
     (
         "/",
         "text/html; charset=utf-8",
-        include_bytes!("../docs/superpowers/concepts/cut-ascii.html"),
+        include_bytes!("../assets/legacy/cut-ascii.html"),
     ),
     (
         "/studio.css",
         "text/css",
-        include_bytes!("../docs/superpowers/concepts/studio.css"),
+        include_bytes!("../assets/legacy/studio.css"),
     ),
     (
         "/studio.js",
         "application/javascript",
-        include_bytes!("../docs/superpowers/concepts/studio.js"),
+        include_bytes!("../assets/legacy/studio.js"),
     ),
     (
         "/ui-assets/cut.svg",
         "image/svg+xml",
-        include_bytes!("../docs/superpowers/concepts/ui-assets/cut.svg"),
+        include_bytes!("../assets/legacy/ui-assets/cut.svg"),
     ),
     (
         "/ui-assets/waveform.svg",
         "image/svg+xml",
-        include_bytes!("../docs/superpowers/concepts/ui-assets/waveform.svg"),
+        include_bytes!("../assets/legacy/ui-assets/waveform.svg"),
     ),
     (
         "/ui-assets/film-strip.svg",
         "image/svg+xml",
-        include_bytes!("../docs/superpowers/concepts/ui-assets/film-strip.svg"),
+        include_bytes!("../assets/legacy/ui-assets/film-strip.svg"),
     ),
     (
         "/ui-assets/sliders-horizontal.svg",
         "image/svg+xml",
-        include_bytes!("../docs/superpowers/concepts/ui-assets/sliders-horizontal.svg"),
+        include_bytes!("../assets/legacy/ui-assets/sliders-horizontal.svg"),
     ),
     (
         "/ui-assets/pause.svg",
         "image/svg+xml",
-        include_bytes!("../docs/superpowers/concepts/ui-assets/pause.svg"),
+        include_bytes!("../assets/legacy/ui-assets/pause.svg"),
     ),
     (
         "/ui-assets/play.svg",
         "image/svg+xml",
-        include_bytes!("../docs/superpowers/concepts/ui-assets/play.svg"),
+        include_bytes!("../assets/legacy/ui-assets/play.svg"),
     ),
     (
         "/ui-assets/monitor.svg",
         "image/svg+xml",
-        include_bytes!("../docs/superpowers/concepts/ui-assets/monitor.svg"),
+        include_bytes!("../assets/legacy/ui-assets/monitor.svg"),
     ),
     (
         "/ui-assets/floppy-disk.svg",
         "image/svg+xml",
-        include_bytes!("../docs/superpowers/concepts/ui-assets/floppy-disk.svg"),
+        include_bytes!("../assets/legacy/ui-assets/floppy-disk.svg"),
     ),
     (
         "/ui-assets/arrows-clockwise.svg",
         "image/svg+xml",
-        include_bytes!("../docs/superpowers/concepts/ui-assets/arrows-clockwise.svg"),
+        include_bytes!("../assets/legacy/ui-assets/arrows-clockwise.svg"),
     ),
     (
         "/ui-assets/game-controller.svg",
         "image/svg+xml",
-        include_bytes!("../docs/superpowers/concepts/ui-assets/game-controller.svg"),
+        include_bytes!("../assets/legacy/ui-assets/game-controller.svg"),
     ),
     (
         "/ui-assets/discord-logo.svg",
         "image/svg+xml",
-        include_bytes!("../docs/superpowers/concepts/ui-assets/discord-logo.svg"),
+        include_bytes!("../assets/legacy/ui-assets/discord-logo.svg"),
     ),
     (
         "/ui-assets/spotify-logo.svg",
         "image/svg+xml",
-        include_bytes!("../docs/superpowers/concepts/ui-assets/spotify-logo.svg"),
+        include_bytes!("../assets/legacy/ui-assets/spotify-logo.svg"),
     ),
     (
         "/ui-assets/microphone.svg",
         "image/svg+xml",
-        include_bytes!("../docs/superpowers/concepts/ui-assets/microphone.svg"),
+        include_bytes!("../assets/legacy/ui-assets/microphone.svg"),
     ),
     (
         "/ui-assets/browser.svg",
         "image/svg+xml",
-        include_bytes!("../docs/superpowers/concepts/ui-assets/browser.svg"),
+        include_bytes!("../assets/legacy/ui-assets/browser.svg"),
     ),
     (
         "/ui-assets/Inter-LICENSE.txt",
         "text/plain",
-        include_bytes!("../docs/superpowers/concepts/ui-assets/Inter-LICENSE.txt"),
+        include_bytes!("../assets/legacy/ui-assets/Inter-LICENSE.txt"),
     ),
     (
         "/ui-assets/Plex-LICENSE.txt",
         "text/plain",
-        include_bytes!("../docs/superpowers/concepts/ui-assets/Plex-LICENSE.txt"),
+        include_bytes!("../assets/legacy/ui-assets/Plex-LICENSE.txt"),
     ),
     (
         "/ui-assets/Phosphor-LICENSE.txt",
         "text/plain",
-        include_bytes!("../docs/superpowers/concepts/ui-assets/Phosphor-LICENSE.txt"),
+        include_bytes!("../assets/legacy/ui-assets/Phosphor-LICENSE.txt"),
     ),
     (
         "/ui-assets/inter.woff2",
         "font/woff2",
-        include_bytes!("../docs/superpowers/concepts/ui-assets/inter.woff2"),
+        include_bytes!("../assets/legacy/ui-assets/inter.woff2"),
     ),
     (
         "/ui-assets/plex-mono.woff2",
         "font/woff2",
-        include_bytes!("../docs/superpowers/concepts/ui-assets/plex-mono.woff2"),
+        include_bytes!("../assets/legacy/ui-assets/plex-mono.woff2"),
     ),
 ];
 
@@ -359,7 +359,7 @@ fn round_window(window: &tao::window::Window) {
 }
 
 fn icon_rgba() -> Result<(Vec<u8>, u32, u32)> {
-    let image = include_bytes!("../docs/superpowers/concepts/ui-assets/cut.png");
+    let image = include_bytes!("../assets/legacy/ui-assets/cut.png");
     let mut reader = png::Decoder::new(std::io::Cursor::new(image)).read_info()?;
     let mut pixels = vec![0; reader.output_buffer_size().ok_or("Icono inválido")?];
     let frame = reader.next_frame(&mut pixels)?;
@@ -472,6 +472,7 @@ pub fn run() -> Result<()> {
     let loaded_mixer = MixerCache::load(&mixer_path);
     let restore_settings = loaded_mixer.is_some();
     let mut mixer = loaded_mixer.unwrap_or_default();
+    crate::hotkey::configure_talk(mixer.settings.push_to_talk);
     let mut persist_at = None;
     let audio = Arc::new(Mutex::new(Arc::new(mixer.settings.clone())));
     let mut audio_monitor: Option<std::sync::mpsc::SyncSender<()>> = None;
@@ -699,7 +700,13 @@ pub fn run() -> Result<()> {
                 }
             }
             Event::UserEvent(Message::Ui(Command::Audio { settings })) => {
+                if let Some(binding) = settings.push_to_talk
+                    && (!binding.valid_talk() || binding == clip_hotkey || !registered) {
+                    update(&web, "notice", "Elige una tecla válida para hablar, distinta de Guardar clip. Los atajos globales deben estar disponibles.");
+                    return;
+                }
                 if mixer.settings != settings {
+                    crate::hotkey::configure_talk(settings.push_to_talk);
                     *audio.lock().unwrap() = Arc::new(settings.clone());
                     mixer.settings = settings;
                     persist_at = Some(Instant::now() + Duration::from_millis(350));
@@ -762,6 +769,10 @@ pub fn run() -> Result<()> {
                 if let Some(capture) = &replay { capture.pause(); }
             }
             Event::UserEvent(Message::Ui(Command::Hotkey { binding })) => {
+                if mixer.settings.push_to_talk == Some(binding) {
+                    update(&web, "hotkeyError", "Esta tecla está asignada a pulsar para hablar.");
+                    return;
+                }
                 match binding.save() {
                     Ok(()) => {
                         hotkey_binding.store(binding.packed(), std::sync::atomic::Ordering::Relaxed);

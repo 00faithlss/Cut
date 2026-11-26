@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0
+
+- **Replay de 10 minutos.** Guarda los últimos momentos desde un historial comprimido en RAM, sin detener la captura.
+- **Pulsar para hablar.** Asigna una tecla y tu voz entra al clip solo mientras la mantienes, también dentro del juego.
+- **Atajos con el teclado numérico.** Números, Enter y operadores funcionan aunque Bloq Num esté desactivado.
+- **Interfaz nativa.** Nuevo diseño con tiburones ASCII, temas claro y oscuro y controles más suaves, sin WebView2.
+- **Mejoras de captura.** Colores corregidos, mejoras contra el audio duplicado y respaldo por CPU hasta 1080p a 30 FPS.
+
 ## 0.2.3
 
 - Menos asignaciones de memoria durante la captura H.264 y la mezcla de audio. Al guardar un clip, la captura de video puede continuar mientras se copian las pistas de audio.

@@ -18,6 +18,9 @@ use crate::{
 const VIDEO_CLOCK: u32 = 90_000;
 const AUDIO_CLOCK: u32 = 48_000;
 const AAC_BLOCK: u32 = 1024;
+// Múltiplo común de los relojes de video y audio. La librería convierte cada
+// muestra a este reloj por división entera: 1000 acumula segundos de error.
+const MOVIE_CLOCK: u32 = 720_000;
 // AAC-LC silencioso a 48 kHz, sin cabecera ADTS.
 const SILENCE_MONO: &[u8] = &[0x00, 0x00, 0x20, 0x07];
 const SILENCE_STEREO: &[u8] = &[0x21, 0x10, 0x00, 0x00, 0x00, 0x1c];
@@ -89,7 +92,7 @@ pub fn write(
             major_brand: brands[0],
             minor_version: 512,
             compatible_brands: brands.to_vec(),
-            timescale: 1000,
+            timescale: MOVIE_CLOCK,
         },
     )?;
     let mut config = TrackConfig::from(AvcConfig {
@@ -120,7 +123,6 @@ pub fn write(
         .collect::<Vec<_>>();
     let blocks = ticks(end - origin, AUDIO_CLOCK).div_ceil(u64::from(AAC_BLOCK));
     let mut block = 0;
-    let mut packet = Vec::new();
     for (index, frame) in frames.iter().enumerate() {
         let relative = frame.timestamp.saturating_sub(origin);
         let start = ticks(relative, VIDEO_CLOCK);
@@ -132,9 +134,9 @@ pub fn write(
         let duration = ticks(next.saturating_sub(origin), VIDEO_CLOCK)
             .saturating_sub(start)
             .max(1);
-        frame.read_into(&mut packet)?;
+        let packet = frame.bytes();
         let mut avcc = Vec::with_capacity(packet.len());
-        for nalu in crate::annex_b::units(&packet).filter(|nalu| !nalu.is_empty()) {
+        for nalu in crate::annex_b::units(packet).filter(|nalu| !nalu.is_empty()) {
             avcc.extend_from_slice(&u32::try_from(nalu.len())?.to_be_bytes());
             avcc.extend_from_slice(nalu);
         }
@@ -229,9 +231,6 @@ fn write_audio_block<W: Write + Seek>(
 }
 
 fn label_audio_tracks<'a>(path: &Path, mut names: impl Iterator<Item = &'a str>) -> io::Result<()> {
-    if names.size_hint().0 == 0 {
-        return Ok(());
-    }
     let mut file = OpenOptions::new().read(true).write(true).open(path)?;
     let length = file.metadata()?.len();
     let mut offset = 0;
@@ -273,7 +272,38 @@ fn label_audio_tracks<'a>(path: &Path, mut names: impl Iterator<Item = &'a str>)
     Err(invalid_atoms())
 }
 
-fn relabel<'a>(mut data: &[u8], names: &mut impl Iterator<Item = &'a str>) -> io::Result<Vec<u8>> {
+fn relabel<'a>(data: &[u8], names: &mut impl Iterator<Item = &'a str>) -> io::Result<Vec<u8>> {
+    rewrite_tracks(data, names, &mut 0, None)
+}
+
+fn audio_handler(mut data: &[u8]) -> io::Result<bool> {
+    while !data.is_empty() {
+        if data.len() < 8 {
+            return Err(invalid_atoms());
+        }
+        let size = u32::from_be_bytes(data[..4].try_into().unwrap()) as usize;
+        if !(8..=data.len()).contains(&size) {
+            return Err(invalid_atoms());
+        }
+        let kind = &data[4..8];
+        let contents = &data[8..size];
+        if kind == b"mdia" {
+            return audio_handler(contents);
+        }
+        if kind == b"hdlr" {
+            return Ok(contents.get(8..12) == Some(b"soun"));
+        }
+        data = &data[size..];
+    }
+    Ok(false)
+}
+
+fn rewrite_tracks<'a>(
+    mut data: &[u8],
+    names: &mut impl Iterator<Item = &'a str>,
+    audio_index: &mut usize,
+    selected: Option<bool>,
+) -> io::Result<Vec<u8>> {
     let mut result = Vec::with_capacity(data.len());
     while !data.is_empty() {
         if data.len() < 8 {
@@ -286,7 +316,71 @@ fn relabel<'a>(mut data: &[u8], names: &mut impl Iterator<Item = &'a str>) -> io
         let kind: &[u8; 4] = data[4..8].try_into().unwrap();
         let contents = &data[8..size];
         match kind {
-            b"trak" | b"mdia" => result.extend(atom(kind, &relabel(contents, names)?)?),
+            b"trak" => {
+                let selected = if audio_handler(contents)? {
+                    let enabled = *audio_index == 0;
+                    *audio_index += 1;
+                    Some(enabled)
+                } else {
+                    None
+                };
+                result.extend(atom(
+                    kind,
+                    &rewrite_tracks(contents, names, audio_index, selected)?,
+                )?);
+            }
+            b"mdia" => result.extend(atom(
+                kind,
+                &rewrite_tracks(contents, names, audio_index, selected)?,
+            )?),
+            b"minf" | b"stbl" => result.extend(atom(
+                kind,
+                &rewrite_tracks(contents, names, audio_index, selected)?,
+            )?),
+            b"stsd" => {
+                if contents.len() < 8 {
+                    return Err(invalid_atoms());
+                }
+                let mut entries = contents[..8].to_vec();
+                entries.extend(rewrite_tracks(
+                    &contents[8..],
+                    names,
+                    audio_index,
+                    selected,
+                )?);
+                result.extend(atom(kind, &entries)?);
+            }
+            b"avc1" => {
+                if contents.len() < 78 {
+                    return Err(invalid_atoms());
+                }
+                let mut entry = contents[..78].to_vec();
+                entry.extend(rewrite_tracks(
+                    &contents[78..],
+                    names,
+                    audio_index,
+                    selected,
+                )?);
+                // ISO nclx: primarias, transferencia y matriz BT.709; rango limitado.
+                entry.extend(atom(b"colr", b"nclx\0\x01\0\x01\0\x01\0")?);
+                result.extend(atom(kind, &entry)?);
+            }
+            b"colr" => {}
+            b"tkhd" if selected.is_some() => {
+                let mut header = contents.to_vec();
+                let group_offset = match header.first() {
+                    Some(0) => 34,
+                    Some(1) => 42,
+                    _ => return Err(invalid_atoms()),
+                };
+                if header.len() < group_offset + 2 {
+                    return Err(invalid_atoms());
+                }
+                // Mezcla y pistas individuales son alternativas, nunca una suma al reproducir.
+                header[3] = (header[3] & !1) | u8::from(selected == Some(true));
+                header[group_offset..group_offset + 2].copy_from_slice(&1u16.to_be_bytes());
+                result.extend(atom(kind, &header)?);
+            }
             b"hdlr" if contents.get(8..12) == Some(b"soun") && contents.len() >= 24 => {
                 let mut label = contents[..24].to_vec();
                 label.extend_from_slice(names.next().ok_or_else(invalid_atoms)?.as_bytes());

@@ -11,8 +11,10 @@ mod clip_name;
 #[cfg(windows)]
 mod com;
 #[cfg(windows)]
-mod cursor;
+mod compat;
 #[cfg(windows)]
+mod cursor;
+#[cfg(all(windows, feature = "legacy-web"))]
 mod desktop;
 #[cfg(windows)]
 mod export_folder;
@@ -37,7 +39,7 @@ mod scale;
 #[cfg(windows)]
 mod updates;
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "legacy-web"))]
 fn main() {
     let mut args = std::env::args_os().skip(1);
     if args.next().as_deref() == Some(std::ffi::OsStr::new(export_folder::PICKER_ARG)) {
@@ -54,6 +56,11 @@ fn main() {
     if let Err(error) = desktop::run() {
         eprintln!("Cut: {error}");
     }
+}
+
+#[cfg(all(windows, not(feature = "legacy-web")))]
+fn main() {
+    eprintln!("Esta es la interfaz antigua; ejecuta Cut.exe.");
 }
 
 #[cfg(not(windows))]

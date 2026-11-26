@@ -15,6 +15,11 @@ pub struct MixerCache {
 
 impl MixerCache {
     pub fn path() -> PathBuf {
+        if std::env::var_os("CUT_NATIVE_VALIDATION").is_some() {
+            return std::env::temp_dir()
+                .join("CutNativeValidation")
+                .join("mezclador.json");
+        }
         std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir)
@@ -27,7 +32,7 @@ impl MixerCache {
         cache
             .settings
             .tracks
-            .retain(|id, _| id == "mic" || id.starts_with("app:"));
+            .retain(|id, _| id == "mic" || id == "system" || id.starts_with("app:"));
         Some(cache)
     }
 

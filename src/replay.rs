@@ -11,10 +11,7 @@ use std::{
 };
 
 use serde::Deserialize;
-use win_native_media::{
-    CaptureTarget, VideoConfig,
-    encoder::{EncodedSample, ParameterSets},
-};
+use win_native_media::{CaptureTarget, VideoConfig};
 use windows::{
     Win32::{
         Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0},
@@ -46,7 +43,7 @@ fn check_freshness(latest: Duration, now: Duration) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq, Eq)]
 pub struct Profile {
     pub id: String,
     pub monitor: bool,
@@ -63,7 +60,7 @@ impl Profile {
         if ![720, 1080, 1440, 2160].contains(&self.height)
             || ![30, 60, 90, 120].contains(&self.fps)
             || ![10, 20, 40, 80].contains(&self.bitrate)
-            || ![15, 30, 60, 120, 300].contains(&self.seconds)
+            || ![15, 30, 60, 120, 300, 600].contains(&self.seconds)
         {
             return Err("Perfil de captura inválido.".into());
         }
@@ -79,8 +76,35 @@ impl Profile {
     }
 }
 
+#[cfg(test)]
+mod profile_tests {
+    use super::Profile;
+
+    #[test]
+    fn admite_diez_minutos_y_conserva_duraciones_anteriores() {
+        let mut profile = Profile {
+            id: "1".into(),
+            monitor: true,
+            height: 1080,
+            fps: 60,
+            bitrate: 20,
+            seconds: 600,
+            cursor: true,
+        };
+        for seconds in [15, 30, 60, 120, 300, 600] {
+            profile.seconds = seconds;
+            assert_eq!(profile.dimensions().unwrap(), (1920, 1080));
+        }
+        for seconds in [0, 599, 601, u64::MAX] {
+            profile.seconds = seconds;
+            assert!(profile.dimensions().is_err());
+        }
+    }
+}
+
 pub struct Replay {
     pub profile: Profile,
+    pub software_encoding: bool,
     game_name: Option<String>,
     stop: Arc<AtomicBool>,
     clock: Arc<audio::Clock>,
@@ -94,8 +118,23 @@ pub struct Replay {
 
 impl Replay {
     pub fn start(profile: Profile, settings: audio::SharedSettings) -> Result<Self> {
+        Self::start_with_encoder(
+            profile,
+            settings,
+            std::env::var_os("CUT_FORCE_SOFTWARE_ENCODER").is_some(),
+        )
+    }
+
+    fn start_with_encoder(
+        mut profile: Profile,
+        settings: audio::SharedSettings,
+        force_software: bool,
+    ) -> Result<Self> {
         let (width, height) = profile.dimensions()?;
         let target = profile.target()?;
+        if matches!(target, CaptureTarget::Window(_)) {
+            crate::compat::Capabilities::current()?.check_window_capture(profile.cursor)?;
+        }
         let game_name = match target {
             CaptureTarget::Window(handle) => {
                 let window = windows_capture::window::Window::from_raw_hwnd(handle as *mut _);
@@ -126,20 +165,48 @@ impl Replay {
         let history: audio::Tracks = Default::default();
         let notices: audio::Notices = Default::default();
         let retain = Duration::from_secs(profile.seconds);
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let worker = thread::Builder::new().name("cut-capture".into()).spawn({
             let data = Arc::clone(&data);
             let stop = Arc::clone(&stop);
             let clock = Arc::clone(&clock);
             let include_cursor = profile.cursor;
             move || {
-                if let Err(error) =
-                    record(target, config, retain, include_cursor, &stop, &data, &clock)
-                {
+                if let Err(error) = record_frames(
+                    RecordingRequest {
+                        target,
+                        config,
+                        retain,
+                        include_cursor,
+                        force_software,
+                    },
+                    &stop,
+                    &data,
+                    &clock,
+                    // Conserva el emisor hasta publicar un posible error de inicio.
+                    ready_tx.clone(),
+                ) {
                     data.lock().unwrap().error = Some(error.to_string());
                 }
                 stop.store(true, Ordering::Relaxed);
             }
         })?;
+        let (effective, software_encoding) = match ready_rx.recv_timeout(Duration::from_secs(15)) {
+            Ok(format) => format,
+            Err(_) => {
+                stop.store(true, Ordering::Relaxed);
+                return Err(data
+                    .lock()
+                    .unwrap()
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "El codificador no pudo iniciar a tiempo.".into())
+                    .into());
+            }
+        };
+        profile.height = effective.height;
+        profile.fps = effective.fps;
+        profile.bitrate = effective.bitrate / 1_000_000;
         let audio_start = thread::Builder::new().name("cut-audio".into()).spawn({
             let stop = Arc::clone(&stop);
             let clock = Arc::clone(&clock);
@@ -166,6 +233,7 @@ impl Replay {
         };
         Ok(Self {
             profile,
+            software_encoding,
             game_name,
             stop,
             clock,
@@ -189,6 +257,10 @@ impl Replay {
             .iter()
             .map(|(id, track)| (id.clone(), track.level))
             .collect()
+    }
+
+    pub fn buffer_bytes(&self) -> usize {
+        self.data.lock().unwrap().bytes()
     }
 
     pub fn status(&self) -> (u64, Option<String>) {
@@ -231,9 +303,7 @@ impl Replay {
                     audio::ClipAudio::Separate => mp4::Audio::Separate(
                         history
                             .iter()
-                            .filter(|(id, _)| {
-                                settings.tracks.get(*id).is_none_or(|gain| gain.include)
-                            })
+                            .filter(|(id, _)| settings.gain(id).include)
                             .map(|(_, track)| track.clone())
                             .collect(),
                     ),
@@ -332,53 +402,34 @@ impl Snapshot {
     }
 }
 
-fn record(
+struct RecordingRequest {
     target: CaptureTarget,
     config: VideoConfig,
     retain: Duration,
     include_cursor: bool,
-    stop: &AtomicBool,
-    data: &Mutex<Buffer>,
-    clock: &audio::Clock,
-) -> Result<()> {
-    // La cola acotada aísla las escrituras del hilo de la GPU.
-    thread::scope(|scope| {
-        let (tx, rx) = mpsc::sync_channel::<(EncodedSample, Option<ParameterSets>)>(8);
-        let writer = scope.spawn(move || -> std::io::Result<()> {
-            let mut writer = storage::Writer::default();
-            for (packet, parameters) in rx {
-                let frame = writer.append(packet)?;
-                let mut buffer = data.lock().unwrap();
-                if let Some(parameters) = parameters {
-                    buffer.parameters = parameters;
-                }
-                buffer.push(frame, retain);
-            }
-            Ok(())
-        });
-        let recording = record_frames(target, config, include_cursor, stop, tx, clock);
-        writer
-            .join()
-            .map_err(|_| "Falló el hilo del historial temporal.")?
-            .map_err(|error| format!("No se pudo escribir el historial temporal: {error}"))?;
-        recording
-    })
+    force_software: bool,
 }
 
 fn record_frames(
-    target: CaptureTarget,
-    config: VideoConfig,
-    include_cursor: bool,
+    request: RecordingRequest,
     stop: &AtomicBool,
-    tx: mpsc::SyncSender<(EncodedSample, Option<ParameterSets>)>,
+    data: &Mutex<Buffer>,
     clock: &audio::Clock,
+    ready: mpsc::SyncSender<(VideoConfig, bool)>,
 ) -> Result<()> {
+    let RecordingRequest {
+        target,
+        config,
+        retain,
+        include_cursor,
+        force_software,
+    } = request;
     // El hilo posee la sesión de captura, las texturas y el codificador.
     let _apartment = crate::com::Mta::enter()?;
     let mut capture =
         Capture::open(target, include_cursor).map_err(|error| format!("Captura: {error}"))?;
-    let mut encoder = Encoder::new(capture.device(), config)
-        .map_err(|error| format!("Inicio del codificador GPU: {error}"))?;
+    let (mut encoder, config, software) =
+        Encoder::select(capture.device(), config, force_software)?;
     let mut nv12 = Scaler::new(
         capture.device(),
         config.width,
@@ -401,6 +452,10 @@ fn record_frames(
         None
     };
     let timer = FrameTimer::new();
+    ready
+        .send((config, software))
+        .map_err(|_| "Se canceló el inicio de la captura.")?;
+    let mut writer = storage::Writer::default();
     let mut packets = Vec::new();
     let interval = Duration::from_nanos(1_000_000_000 / u64::from(config.fps));
     let mut next = Duration::ZERO;
@@ -410,15 +465,19 @@ fn record_frames(
     while !stop.load(Ordering::Relaxed) {
         encoder
             .poll(&mut packets)
-            .map_err(|error| format!("Salida del codificador GPU: {error}"))?;
+            .map_err(|error| format!("Salida del codificador H.264: {error}"))?;
         for packet in packets.drain(..) {
             let parameters = packet.is_keyframe.then(|| encoder.parameters.clone());
-            tx.send((packet, parameters))
-                .map_err(|_| "Se cerró el historial temporal.")?;
+            let frame = writer.append(packet)?;
+            let mut history = data.lock().unwrap();
+            if let Some(parameters) = parameters {
+                history.parameters = parameters;
+            }
+            history.push(frame, retain);
             has_output = true;
         }
         if !has_output && initial.elapsed() > Duration::from_secs(8) {
-            return Err("La GPU no entregó fotogramas H.264.".into());
+            return Err("El codificador no entregó fotogramas H.264.".into());
         }
         let now = clock.now()?;
         if now >= next && encoder.accepts_input() {
@@ -459,7 +518,7 @@ fn record_frames(
                 }
                 encoder
                     .submit(&input, next)
-                    .map_err(|error| format!("Entrada del codificador GPU: {error}"))?;
+                    .map_err(|error| format!("Entrada del codificador H.264: {error}"))?;
                 // Retiene la muestra para que el pool no recicle la imagen que se repite.
                 if source {
                     last_frame = Some(input);
@@ -519,6 +578,7 @@ impl Drop for FrameTimer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use win_native_media::encoder::{EncodedSample, ParameterSets};
     use windows_capture::window::Window;
 
     #[test]
@@ -568,6 +628,12 @@ mod tests {
             ));
             let result = (|| -> Result<_> {
                 mp4::write(&path, fs::File::create(&path)?, &video, &frames, &audio)?;
+                assert!(
+                    fs::read(&path)?
+                        .windows(15)
+                        .any(|bytes| bytes == b"colrnclx\0\x01\0\x01\0\x01\0"),
+                    "El MP4 debe declarar BT.709 limitado"
+                );
                 let file = fs::File::open(&path)?;
                 let len = file.metadata()?.len();
                 let reader = ::mp4::Mp4Reader::read_header(std::io::BufReader::new(file), len)?;
@@ -576,6 +642,16 @@ mod tests {
                     .values()
                     .filter(|track| matches!(track.track_type(), Ok(::mp4::TrackType::Audio)))
                     .count();
+                let mut audio: Vec<_> = reader
+                    .tracks()
+                    .values()
+                    .filter(|track| matches!(track.track_type(), Ok(::mp4::TrackType::Audio)))
+                    .collect();
+                audio.sort_by_key(|track| track.track_id());
+                for (i, track) in audio.iter().enumerate() {
+                    assert_eq!(track.trak.tkhd.alternate_group, 1);
+                    assert_eq!(track.trak.tkhd.flags & 1, u32::from(i == 0));
+                }
                 Ok(count)
             })();
             let _ = fs::remove_file(path);
@@ -589,6 +665,166 @@ mod tests {
         let last = Duration::from_secs(120);
         assert!(check_freshness(last, Duration::from_secs(121)).is_ok());
         assert!(check_freshness(last, Duration::from_secs(129)).is_err());
+    }
+
+    #[test]
+    fn exportacion_conserva_diez_minutos_en_pelicula_y_pistas() -> Result<()> {
+        let mut spool = storage::Writer::default();
+        let frames = (0..18000)
+            .map(|i| {
+                spool.append(EncodedSample {
+                    timestamp: Duration::from_nanos(i * 1_000_000_000 / 30),
+                    is_keyframe: i % 30 == 0,
+                    data: vec![0, 0, 0, 1, 0x65, 0x80],
+                })
+            })
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let video = mp4::Video {
+            width: 1280,
+            height: 720,
+            fps: 30,
+            parameters: ParameterSets {
+                sps: vec![0x67, 0x64, 0, 0x1f],
+                pps: vec![0x68, 0xce, 0x3c, 0x80],
+            },
+        };
+        let path = std::env::temp_dir().join(format!(
+            "cut-duration-regression-{}.mp4",
+            std::process::id()
+        ));
+        mp4::write(
+            &path,
+            fs::File::create(&path)?,
+            &video,
+            &frames,
+            &mp4::Audio::Mixed(None),
+        )?;
+        let file = fs::File::open(&path)?;
+        let reader = ::mp4::Mp4Reader::read_header(
+            std::io::BufReader::new(file),
+            fs::metadata(&path)?.len(),
+        )?;
+        let movie = reader.duration();
+        let tracks: Vec<_> = reader
+            .tracks()
+            .values()
+            .map(|track| track.duration())
+            .collect();
+        drop(reader);
+        fs::remove_file(path)?;
+        assert_eq!(movie, Duration::from_secs(600));
+        assert!(
+            tracks
+                .iter()
+                .all(|duration| *duration == Duration::from_secs(600))
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "Reutiliza un MP4 real indicado en CUT_VERIFY_MP4 sin volver a capturar"]
+    fn reexporta_material_real_y_verifica_duracion() -> Result<()> {
+        let input = std::env::var_os("CUT_VERIFY_MP4").ok_or("Falta CUT_VERIFY_MP4")?;
+        let file = fs::File::open(&input)?;
+        let mut reader = ::mp4::Mp4Reader::read_header(
+            std::io::BufReader::new(file),
+            fs::metadata(&input)?.len(),
+        )?;
+        let track = reader
+            .tracks()
+            .values()
+            .find(|track| matches!(track.track_type(), Ok(::mp4::TrackType::Video)))
+            .ok_or("Falta video")?;
+        let (id, scale, count) = (track.track_id(), track.timescale(), track.sample_count());
+        let video = mp4::Video {
+            width: track.width() as u32,
+            height: track.height() as u32,
+            fps: track.frame_rate().round() as u32,
+            parameters: ParameterSets {
+                sps: track.sequence_parameter_set()?.to_vec(),
+                pps: track.picture_parameter_set()?.to_vec(),
+            },
+        };
+        let to_time = |ticks: u64, scale: u32| {
+            Duration::from_nanos((u128::from(ticks) * 1_000_000_000 / u128::from(scale)) as u64)
+        };
+        let mut spool = storage::Writer::default();
+        let mut frames = Vec::new();
+        for i in 1..=count {
+            let sample = reader.read_sample(id, i)?.ok_or("Falta muestra de video")?;
+            let mut data = Vec::new();
+            let mut avcc = sample.bytes.as_ref();
+            while !avcc.is_empty() {
+                let prefix: [u8; 4] = avcc.get(..4).ok_or("NAL incompleta")?.try_into()?;
+                let length = u32::from_be_bytes(prefix) as usize;
+                let nalu = avcc.get(4..4 + length).ok_or("NAL truncada")?;
+                data.extend_from_slice(&[0, 0, 0, 1]);
+                data.extend_from_slice(nalu);
+                avcc = &avcc[4 + length..];
+            }
+            frames.push(spool.append(EncodedSample {
+                timestamp: to_time(sample.start_time, scale),
+                is_keyframe: sample.is_sync,
+                data,
+            })?);
+        }
+        let track = reader
+            .tracks()
+            .values()
+            .filter(|track| matches!(track.track_type(), Ok(::mp4::TrackType::Audio)))
+            .min_by_key(|track| track.track_id())
+            .ok_or("Falta audio")?;
+        let (id, scale, count) = (track.track_id(), track.timescale(), track.sample_count());
+        let channels = if track.channel_config()? == ::mp4::ChannelConfig::Mono {
+            1
+        } else {
+            2
+        };
+        let mut history = audio::History {
+            name: "Mezcla".into(),
+            channels,
+            packets: Default::default(),
+            level: 0.,
+        };
+        for i in 1..=count {
+            let sample = reader.read_sample(id, i)?.ok_or("Falta muestra de audio")?;
+            history
+                .packets
+                .push_back(Arc::new(win_native_media::audio::EncodedAudio {
+                    timestamp: to_time(sample.start_time, scale),
+                    data: sample.bytes.to_vec(),
+                }));
+        }
+        let path = std::env::temp_dir()
+            .join("cut-verificacion")
+            .join(format!("Cut-10min-corregido-{}.mp4", std::process::id()));
+        mp4::write(
+            &path,
+            fs::File::create(&path)?,
+            &video,
+            &frames,
+            &mp4::Audio::Mixed(Some(history)),
+        )?;
+        let file = fs::File::open(&path)?;
+        let reader = ::mp4::Mp4Reader::read_header(
+            std::io::BufReader::new(file),
+            fs::metadata(&path)?.len(),
+        )?;
+        assert!(reader.duration() >= Duration::from_secs(598));
+        let video = reader
+            .tracks()
+            .values()
+            .find(|track| matches!(track.track_type(), Ok(::mp4::TrackType::Video)))
+            .unwrap();
+        assert_eq!(video.sample_count() as usize, frames.len());
+        assert!(reader.duration().abs_diff(video.duration()) < Duration::from_millis(25));
+        println!(
+            "{}: {:?}, {} fotogramas preservados",
+            path.display(),
+            reader.duration(),
+            frames.len()
+        );
+        Ok(())
     }
 
     #[test]
@@ -622,6 +858,46 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Requiere Windows interactivo, GPU y más de diez minutos de captura real"]
+    fn retiene_y_exporta_diez_minutos_reales() -> Result<()> {
+        let replay = Replay::start(
+            Profile {
+                id: "0".into(),
+                monitor: true,
+                height: 720,
+                fps: 30,
+                bitrate: 10,
+                seconds: 600,
+                cursor: false,
+            },
+            Default::default(),
+        )?;
+        espera_frames(&replay, 600)?;
+        let snapshot = replay.snapshot()?;
+        let elapsed = snapshot
+            .samples
+            .last()
+            .unwrap()
+            .timestamp
+            .saturating_sub(snapshot.samples.first().unwrap().timestamp);
+        assert!(
+            elapsed >= Duration::from_secs(598),
+            "Historial incompleto: {elapsed:?}"
+        );
+        let path = snapshot.save(&std::env::temp_dir().join("cut-verificacion"))?;
+        let file = fs::File::open(&path)?;
+        let length = file.metadata()?.len();
+        let reader = ::mp4::Mp4Reader::read_header(std::io::BufReader::new(file), length)?;
+        assert!(reader.duration() >= Duration::from_secs(598));
+        println!(
+            "Replay real de diez minutos: {} ({:?})",
+            path.display(),
+            reader.duration()
+        );
+        Ok(())
+    }
+
+    #[test]
     #[ignore = "Requiere una ventana de prueba 4:3 visible en Windows"]
     fn captura_ventana_y_guarda_mp4() -> Result<()> {
         let title = "Cut WGC 4x3 test pattern";
@@ -633,6 +909,127 @@ mod tests {
     #[ignore = "Requiere una sesión interactiva de Windows"]
     fn captura_monitor_y_guarda_mp4() -> Result<()> {
         prueba_clipear("0".into(), true)
+    }
+
+    #[test]
+    #[ignore = "Requiere escritorio Windows y encoder H.264 de Windows; fuerza CPU sin desactivar la GPU"]
+    fn respaldo_cpu_captura_y_exporta_1080p30_en_ram() -> Result<()> {
+        let capture = Replay::start_with_encoder(
+            Profile {
+                id: "0".into(),
+                monitor: true,
+                height: 2160,
+                fps: 120,
+                bitrate: 80,
+                seconds: 15,
+                cursor: false,
+            },
+            Default::default(),
+            true,
+        )?;
+        assert!(capture.software_encoding);
+        assert_eq!(
+            (
+                capture.profile.height,
+                capture.profile.fps,
+                capture.profile.bitrate
+            ),
+            (1080, 30, 20)
+        );
+        espera_frames(&capture, 4)?;
+        assert!(capture.buffer_bytes() > 0);
+        let snapshot = capture.snapshot()?;
+        assert_eq!(
+            (
+                snapshot.video.width,
+                snapshot.video.height,
+                snapshot.video.fps
+            ),
+            (1920, 1080, 30)
+        );
+        let path = snapshot.save(&std::env::temp_dir().join("cut-cpu-verificacion"))?;
+        let file = fs::File::open(&path)?;
+        let reader = ::mp4::Mp4Reader::read_header(
+            std::io::BufReader::new(file),
+            fs::metadata(&path)?.len(),
+        )?;
+        assert!(reader.duration() >= Duration::from_secs(3));
+        println!(
+            "Respaldo Windows H.264 CPU: {} ({:?})",
+            path.display(),
+            reader.duration()
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "Requiere escritorio Windows, GPU y unos 42 segundos; verifica ventana móvil real en GPU/CPU"]
+    fn replay_ram_exporta_ultimos_quince_segundos_y_sigue_capturando() -> Result<()> {
+        for force_software in [false, true] {
+            let capture = Replay::start_with_encoder(
+                Profile {
+                    id: "0".into(),
+                    monitor: true,
+                    height: 720,
+                    fps: 30,
+                    bitrate: 10,
+                    seconds: 15,
+                    cursor: false,
+                },
+                Default::default(),
+                force_software,
+            )?;
+            espera_frames(&capture, 15)?;
+            let first = capture.snapshot()?;
+            let initial_start = first.samples.first().unwrap().timestamp;
+            let initial_end = first.samples.last().unwrap().timestamp;
+            let directory = std::env::temp_dir().join("cut-ram-verificacion");
+            let saved_directory = directory.clone();
+            let export =
+                thread::spawn(move || first.save(&saved_directory).map_err(|e| e.to_string()));
+            thread::sleep(Duration::from_secs(5));
+            let second = capture.snapshot()?;
+            let start = second.samples.first().unwrap().timestamp;
+            let end = second.samples.last().unwrap().timestamp;
+            assert!(
+                start >= initial_start + Duration::from_secs(3),
+                "El inicio no avanzó: {initial_start:?} -> {start:?}"
+            );
+            assert!(
+                end >= initial_end + Duration::from_secs(4),
+                "La captura se detuvo al guardar"
+            );
+            assert!(
+                end - start <= Duration::from_secs(17),
+                "Se acumuló video desde el inicio"
+            );
+            let first_path = export
+                .join()
+                .map_err(|_| "Falló el hilo de exportación")??;
+            let second_path = second.save(&directory)?;
+            assert_ne!(first_path, second_path);
+            let file = fs::File::open(&second_path)?;
+            let reader = ::mp4::Mp4Reader::read_header(
+                std::io::BufReader::new(file),
+                fs::metadata(&second_path)?.len(),
+            )?;
+            assert!(
+                (Duration::from_secs(14)..Duration::from_secs(17)).contains(&reader.duration())
+            );
+            println!(
+                "{}: {:?}, sesión {:?}, inicio {:?}, {} bytes RAM",
+                if capture.software_encoding {
+                    "CPU"
+                } else {
+                    "GPU"
+                },
+                reader.duration(),
+                end,
+                start,
+                capture.buffer_bytes()
+            );
+        }
+        Ok(())
     }
 
     #[test]
@@ -702,6 +1099,10 @@ mod tests {
         profile.fps = 120;
         profile.bitrate = 80;
         let capture = Replay::start(profile, Default::default())?;
+        assert!(
+            !capture.software_encoding,
+            "Esta prueba requiere un encoder por hardware disponible."
+        );
         espera_frames(&capture, 6)?;
         let output = std::env::temp_dir().join("cut-verificacion");
         let first = capture.snapshot()?.save(&output)?;
