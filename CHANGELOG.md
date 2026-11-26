@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1 · Hotfix
+
+- **Combinaciones para guardar clips.** Puedes asignar atajos como Ctrl + Mayús + S, Alt + Espacio o Ctrl + F9.
+- **Pulsar para hablar con cualquier tecla.** Ahora puedes usar Alt, Ctrl, Mayús, Espacio, símbolos o el teclado numérico, solos o combinados.
+- **Voz sin cortes.** Tu voz ya no se corta al pulsar Mayús o Ctrl mientras hablas, y puedes guardar un clip sin soltar la tecla.
+
 ## 0.3.0
 
 - **Replay de 10 minutos.** Guarda los últimos momentos desde un historial comprimido en RAM, sin detener la captura.

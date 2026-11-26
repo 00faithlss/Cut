@@ -62,7 +62,7 @@ fn validate_shortcuts(
     registered: bool,
 ) -> Result<(), &'static str> {
     if !save.valid() {
-        return Err("Las letras y números para guardar requieren Ctrl o Alt.");
+        return Err("Para guardar, usa una tecla F, del teclado numérico o una combinación con Ctrl o Alt.");
     }
     if talk.is_some_and(|talk| !talk.valid_talk() || talk == save || !registered) {
         return Err("Elige un atajo de voz válido y distinto al de guardar.");

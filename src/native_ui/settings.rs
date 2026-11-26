@@ -165,7 +165,7 @@ impl Studio {
                                     .text_size(px(12.))
                                     .line_height(relative(1.4))
                                     .text_color(th.muted)
-                                    .child("Tu micrófono solo entra al clip mientras mantienes la tecla. Acepta teclas del teclado numérico."),
+                                    .child("Tu micrófono solo entra al clip mientras mantienes la tecla. Sirve cualquier tecla, también Alt, Ctrl o el teclado numérico."),
                             ),
                     )
                     .child(switch(th, "talk-switch", ptt.is_some()).on_click(cx.listener(|this, _, _, cx| {

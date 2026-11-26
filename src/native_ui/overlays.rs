@@ -11,31 +11,21 @@ use std::time::Duration;
 
 const RELEASES: &str = "https://github.com/00faithlss/Cut/releases";
 
-const ITEMS: [(&str, &str, &str); 5] = [
+const ITEMS: [(&str, &str, &str); 3] = [
     (
-        "film",
-        "Replay de 10 minutos",
-        "Guarda los últimos momentos desde un historial comprimido en RAM, sin detener la captura.",
-    ),
-    (
-        "mic",
-        "Pulsar para hablar",
-        "Asigna una tecla en Ajustes y tu voz solo entra al clip mientras la mantienes, también dentro del juego.",
+        "save",
+        "Combinaciones para guardar clips",
+        "Puedes asignar atajos como Ctrl + Mayús + S, Alt + Espacio o Ctrl + F9.",
     ),
     (
         "key",
-        "Atajos con el teclado numérico",
-        "Num 0–9, Num Enter y los operadores funcionan como atajos, aunque Bloq Num esté desactivado.",
+        "Pulsar para hablar con cualquier tecla",
+        "Ahora puedes usar Alt, Ctrl, Mayús, Espacio, símbolos o el teclado numérico, solos o combinados.",
     ),
     (
-        "window",
-        "Interfaz nativa",
-        "Cut ya no depende de WebView2 y la ventana sigue el escalado de Windows.",
-    ),
-    (
-        "film",
-        "Mejoras de captura",
-        "Colores corregidos, mejoras contra el audio duplicado y respaldo por CPU hasta 1080p a 30 FPS.",
+        "mic",
+        "Voz sin cortes",
+        "Tu voz ya no se corta al pulsar Mayús o Ctrl mientras hablas, y puedes guardar un clip sin soltar la tecla.",
     ),
 ];
 

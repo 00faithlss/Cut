@@ -16,7 +16,8 @@ use windows::Win32::{
     System::{LibraryLoader::GetModuleHandleW, SystemInformation::GetTickCount64},
     UI::{
         Input::KeyboardAndMouse::{
-            GetAsyncKeyState, VK_CONTROL, VK_F9, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+            GetAsyncKeyState, MAPVK_VK_TO_CHAR, MapVirtualKeyW, VK_CONTROL, VK_F9, VK_LWIN, VK_MENU,
+            VK_RWIN, VK_SHIFT,
         },
         WindowsAndMessaging::{
             CallNextHookEx, GetMessageW, HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_UP, MSG,
@@ -60,6 +61,8 @@ struct Shortcut {
     talk: TalkGate,
     talk_binding: u32,
     talk_generation: u32,
+    /// While editing: a modifier key pressed alone, captured if it is released alone.
+    lone_modifier: Option<u8>,
 }
 
 static TALK_BINDING: AtomicU32 = AtomicU32::new(0);
@@ -117,7 +120,8 @@ pub fn talk_open() -> bool {
     let key = TALK_VIRTUAL_KEY.load(Ordering::SeqCst);
     let held = key != 0 && unsafe { GetAsyncKeyState(key as i32) < 0 };
     let mut gate = TalkGate { open: true };
-    if !gate.validate_hold(held, held_modifiers() == Binding::unpack(binding).modifiers) {
+    let required = Binding::unpack(binding).modifiers;
+    if !gate.validate_hold(held, held_modifiers() & required == required) {
         // Windows actualiza GetAsyncKeyState después de retornar del callback.
         // Mientras se confirma la pulsación, se mantiene el audio cerrado sin
         // invalidar un keydown que todavía está siendo entregado.
@@ -147,22 +151,34 @@ impl TalkGate {
         self.open &= key_held && modifiers_match;
         self.open
     }
-    fn event(&mut self, binding: Binding, key: u8, released: bool, modifiers: u8, editing: bool) {
-        let released_modifier = match key {
-            0x11 | 0xa2 | 0xa3 => 1,
-            0x12 | 0xa4 | 0xa5 => 2,
-            0x10 | 0xa0 | 0xa1 => 4,
-            _ => 0,
-        };
-        if editing
-            || modifiers != binding.modifiers
-            || (released && (key == binding.key || released_modifier & binding.modifiers != 0))
-        {
+    /// Opens on the talk key, closes when it (or a modifier it needs) is released.
+    /// Other keys and extra modifiers never close it: in a game you can sprint with
+    /// Mayús or crouch with Ctrl while you talk.
+    fn event(&mut self, binding: Binding, key: u8, released: bool, held: u8, editing: bool) {
+        if editing {
             self.open = false;
-        } else if key == binding.key && !released {
-            self.open = true;
+        } else if key == binding.key {
+            self.open = !released && held & binding.modifiers == binding.modifiers;
+        } else if released && modifier_bit(key) & binding.modifiers != 0 {
+            self.open = false;
         }
     }
+}
+
+/// The modifier flag a key stands for (1 Ctrl, 2 Alt, 4 Mayús, 8 Windows), or 0.
+fn modifier_bit(key: u8) -> u8 {
+    match key {
+        0x11 | 0xa2 | 0xa3 => 1,
+        0x12 | 0xa4 | 0xa5 => 2,
+        0x10 | 0xa0 | 0xa1 => 4,
+        0x5b | 0x5c => 8,
+        _ => 0,
+    }
+}
+
+/// Modifier flags that holding `key` itself produces. Alt Gr also reports Ctrl.
+fn own_modifiers(key: u8) -> u8 {
+    if key == 0xa5 { 2 | 1 } else { modifier_bit(key) }
 }
 
 thread_local! {
@@ -187,7 +203,35 @@ impl Binding {
             0x6e => "Num .".into(),
             0x6f => "Num /".into(),
             0x1b => "Esc".into(),
-            _ => char::from(self.key).to_string(),
+            0x08 => "Retroceso".into(),
+            0x09 => "Tab".into(),
+            0x0d => "Enter".into(),
+            0x13 => "Pausa".into(),
+            0x14 => "Bloq Mayús".into(),
+            0x20 => "Espacio".into(),
+            0x21 => "Re Pág".into(),
+            0x22 => "Av Pág".into(),
+            0x23 => "Fin".into(),
+            0x24 => "Inicio".into(),
+            0x25 => "←".into(),
+            0x26 => "↑".into(),
+            0x27 => "→".into(),
+            0x28 => "↓".into(),
+            0x2c => "Impr Pant".into(),
+            0x2d => "Insert".into(),
+            0x2e => "Supr".into(),
+            0x5d => "Menú".into(),
+            0x90 => "Bloq Num".into(),
+            0x91 => "Bloq Despl".into(),
+            0xa0 => "Mayús izq.".into(),
+            0xa1 => "Mayús der.".into(),
+            0xa2 => "Ctrl izq.".into(),
+            0xa3 => "Ctrl der.".into(),
+            0xa4 => "Alt".into(),
+            0xa5 => "Alt Gr".into(),
+            b'0'..=b'9' | b'A'..=b'Z' => char::from(self.key).to_string(),
+            // Punctuation keys depend on the layout (Ñ, ´, +, -…): ask Windows.
+            _ => layout_char(self.key).unwrap_or_else(|| format!("Tecla {}", self.key)),
         };
         let mut parts = Vec::new();
         for (flag, name) in [(1, "Ctrl"), (2, "Alt"), (4, "Mayús")] {
@@ -201,8 +245,11 @@ impl Binding {
     pub fn is_escape(self) -> bool {
         self.key == 0x1b
     }
+    /// Any key of the keyboard works for talking, alone or with modifiers: letters,
+    /// numbers, symbols, Espacio, Alt, Ctrl, Mayús, the numeric keypad… Only Esc
+    /// (it cancels editing) and the Windows keys (they open Start) are left out.
     pub fn valid_talk(self) -> bool {
-        self.valid() || (self.modifiers <= 7 && matches!(self.key, 48..=57 | 65..=90))
+        self.modifiers <= 7 && !matches!(self.key, 0 | 0x01..=0x07 | 0x1b | 0x5b | 0x5c | 0xff)
     }
     const REGISTRY_KEY: &str = r"Software\Cut";
     const VALUE: &str = "ClipHotkey";
@@ -222,10 +269,17 @@ impl Binding {
         }
     }
 
+    /// Shortcuts for saving a clip: an F key or a numeric-keypad key, alone or with
+    /// modifiers, or any other key combined with Ctrl or Alt (Ctrl + Mayús + S,
+    /// Alt + Espacio…). Keys you type with, alone or with only Mayús, are left out so
+    /// writing never saves a clip; so are lone modifiers, Esc and the Windows keys.
     pub fn valid(self) -> bool {
         self.modifiers <= 7
-            && (matches!(self.key, 112..=135 | 0x60..=0x6b | 0x6d..=0x6f | NUMPAD_ENTER)
-                || (self.modifiers & 3 != 0 && matches!(self.key, 48..=57 | 65..=90)))
+            && match self.key {
+                112..=135 | 0x60..=0x6b | 0x6d..=0x6f | NUMPAD_ENTER => true,
+                0 | 0x01..=0x07 | 0x10..=0x12 | 0x1b | 0x5b | 0x5c | 0xa0..=0xa5 | 0xff => false,
+                _ => self.modifiers & 3 != 0,
+            }
     }
 
     pub fn load() -> Self {
@@ -243,7 +297,7 @@ impl Binding {
         if !self.valid() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "Las letras y números requieren Ctrl o Alt.",
+                "Usa una tecla F, del teclado numérico o una combinación con Ctrl o Alt.",
             ));
         }
         let (key, _) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(Self::REGISTRY_KEY)?;
@@ -269,6 +323,7 @@ pub fn listen(
                     talk: TalkGate::default(),
                     talk_binding: 0,
                     talk_generation: 0,
+                    lone_modifier: None,
                 }));
             });
             let hook = unsafe {
@@ -304,18 +359,12 @@ unsafe extern "system" fn on_key(code: i32, message: WPARAM, data: LPARAM) -> LR
                 if shortcut.editing.load(Ordering::Relaxed) {
                     shortcut.talk.open = false;
                     close_talk();
-                    if !released && !matches!(physical, 0x10..=0x12 | 0xa0..=0xa5 | 0x5b..=0x5c) {
-                        CAPTURED.store(
-                            Binding {
-                                key: physical,
-                                modifiers: held_modifiers(),
-                            }
-                            .packed(),
-                            Ordering::SeqCst,
-                        );
+                    if let Some(binding) = shortcut.capture(physical, released) {
+                        CAPTURED.store(binding.packed(), Ordering::SeqCst);
                     }
                     return;
                 }
+                shortcut.lone_modifier = None;
                 let talk_binding = TALK_BINDING.load(Ordering::SeqCst);
                 let generation = TALK_GENERATION.load(Ordering::SeqCst);
                 if talk_binding != shortcut.talk_binding || generation != shortcut.talk_generation {
@@ -340,10 +389,13 @@ unsafe extern "system" fn on_key(code: i32, message: WPARAM, data: LPARAM) -> LR
                 if released && shortcut.key.held == Some(physical) {
                     shortcut.key.held = None;
                 }
+                // Holding a modifier used as the talk key must not block saving.
+                let talk_key = Binding::unpack(talk_binding).key;
+                let talking_with = if talk_binding != 0 && shortcut.talk.open { own_modifiers(talk_key) } else { 0 };
                 if physical == binding.key
                     && shortcut.key.press(binding.key, released)
                     && !shortcut.editing.load(Ordering::Relaxed)
-                    && matches_modifiers(binding)
+                    && held_modifiers() & !(talking_with & !binding.modifiers) == binding.modifiers
                 {
                     (shortcut.trigger)();
                 }
@@ -351,6 +403,50 @@ unsafe extern "system" fn on_key(code: i32, message: WPARAM, data: LPARAM) -> LR
         });
     }
     unsafe { CallNextHookEx(None, code, message, data) }
+}
+
+impl Shortcut {
+    /// A key pressed while a shortcut is being edited. Ordinary keys are taken on
+    /// press, together with the modifiers held. A modifier (Alt, Ctrl, Mayús) is taken
+    /// alone when it is released without any other key in between, so Alt can be the
+    /// talk key and Alt + T still works as a combination.
+    fn capture(&mut self, key: u8, released: bool) -> Option<Binding> {
+        capture_key(&mut self.lone_modifier, key, released, held_modifiers)
+    }
+}
+
+fn capture_key(lone: &mut Option<u8>, key: u8, released: bool, held: impl Fn() -> u8) -> Option<Binding> {
+    match key {
+        // Windows keys open Start; never a shortcut.
+        0x5b | 0x5c => {
+            *lone = None;
+            None
+        }
+        0x10..=0x12 | 0xa0..=0xa5 => {
+            if !released {
+                *lone = Some(key);
+                None
+            } else if *lone == Some(key) {
+                *lone = None;
+                Some(Binding { key, modifiers: 0 })
+            } else {
+                None
+            }
+        }
+        _ if released => None,
+        _ => {
+            *lone = None;
+            Some(Binding { key, modifiers: held() })
+        }
+    }
+}
+
+/// The character a punctuation key types on the current keyboard layout.
+fn layout_char(key: u8) -> Option<String> {
+    let value = unsafe { MapVirtualKeyW(u32::from(key), MAPVK_VK_TO_CHAR) } & 0xffff;
+    char::from_u32(value)
+        .filter(|c| !c.is_control() && !c.is_whitespace())
+        .map(|c| c.to_uppercase().collect())
 }
 
 #[derive(Default)]
@@ -364,10 +460,6 @@ impl KeyPress {
         self.held = (!released).then_some(key);
         !was_held && !released
     }
-}
-
-fn matches_modifiers(binding: Binding) -> bool {
-    held_modifiers() == binding.modifiers
 }
 
 fn held_modifiers() -> u8 {
@@ -402,6 +494,77 @@ mod tests {
         assert!(!gate.open);
         gate.event(binding, 119, false, 0, false);
         assert!(gate.validate_hold(true, true));
+    }
+
+    #[test]
+    fn alt_solo_sirve_para_hablar_y_alt_mas_tecla_sigue_siendo_combinacion() {
+        let mut lone = None;
+        // Alt pulsado y soltado sin nada en medio: se toma Alt solo.
+        assert_eq!(capture_key(&mut lone, 0xa4, false, || 2), None);
+        assert_eq!(capture_key(&mut lone, 0xa4, true, || 0), Some(Binding { key: 0xa4, modifiers: 0 }));
+        // Alt + T: se toma la combinación y soltar Alt después no cambia nada.
+        assert_eq!(capture_key(&mut lone, 0xa4, false, || 2), None);
+        assert_eq!(capture_key(&mut lone, b'T', false, || 2), Some(Binding { key: b'T', modifiers: 2 }));
+        assert_eq!(capture_key(&mut lone, 0xa4, true, || 0), None);
+        // Alt Gr envía un Ctrl izquierdo falso: cuenta el último modificador.
+        assert_eq!(capture_key(&mut lone, 0xa2, false, || 1), None);
+        assert_eq!(capture_key(&mut lone, 0xa5, false, || 3), None);
+        assert_eq!(capture_key(&mut lone, 0xa2, true, || 2), None);
+        assert_eq!(capture_key(&mut lone, 0xa5, true, || 0), Some(Binding { key: 0xa5, modifiers: 0 }));
+        // Las teclas Windows nunca se toman.
+        assert_eq!(capture_key(&mut lone, 0x5b, false, || 8), None);
+        assert_eq!(capture_key(&mut lone, 0x5b, true, || 0), None);
+    }
+
+    #[test]
+    fn guardar_admite_combinaciones_con_ctrl_o_alt() {
+        let ok = |key, modifiers| Binding { key, modifiers }.valid();
+        assert!(ok(b'S', 1 | 4)); // Ctrl + Mayús + S
+        assert!(ok(0x20, 2)); // Alt + Espacio
+        assert!(ok(0x70 + 8, 1)); // Ctrl + F9
+        assert!(ok(0x60, 4)); // Mayús + Num 0
+        assert!(ok(0xc0, 1 | 2)); // Ctrl + Alt + Ñ
+        assert!(ok(0x25, 1)); // Ctrl + ←
+        assert!(!ok(b'S', 0)); // escribir no guarda
+        assert!(!ok(b'S', 4)); // Mayús + S tampoco
+        assert!(!ok(0x20, 0));
+        assert!(!ok(0xa4, 0)); // Alt solo
+        assert!(!ok(0x1b, 1));
+        assert!(!ok(b'S', 8)); // con Windows
+    }
+
+    #[test]
+    fn cualquier_tecla_del_teclado_sirve_para_hablar() {
+        for key in [0xa4, 0xa5, 0xa2, 0xa3, 0xa0, 0xa1, 0x20, 0x09, 0x14, b'V', b'1', 0xc0, 0xba, 0x25, 0x60, NUMPAD_ENTER, 0x70] {
+            assert!(Binding { key, modifiers: 0 }.valid_talk(), "tecla {key:#x}");
+        }
+        for key in [0x1b, 0x5b, 0x5c] {
+            assert!(!Binding { key, modifiers: 0 }.valid_talk(), "tecla {key:#x}");
+        }
+    }
+
+    #[test]
+    fn hablar_con_alt_no_se_corta_por_el_propio_alt_ni_por_otros_modificadores() {
+        let alt = Binding { key: 0xa4, modifiers: 0 };
+        let mut gate = TalkGate::default();
+        gate.event(alt, 0xa4, false, 2, false);
+        assert!(gate.open);
+        // Correr con Mayús o agacharse con Ctrl mientras hablas.
+        gate.event(alt, 0xa0, false, 2 | 4, false);
+        gate.event(alt, 0xa0, true, 2, false);
+        gate.event(alt, 0xa2, false, 2 | 1, false);
+        assert!(gate.open);
+        assert!(gate.validate_hold(true, true));
+        gate.event(alt, 0xa4, true, 0, false);
+        assert!(!gate.open);
+        // Una tecla sin modificadores tampoco se corta al pulsar Mayús.
+        let v = Binding { key: b'V', modifiers: 0 };
+        let mut gate = TalkGate::default();
+        gate.event(v, b'V', false, 4, false);
+        assert!(gate.open);
+        gate.event(v, 0xa0, true, 0, false);
+        assert!(gate.open);
+        assert_eq!(own_modifiers(0xa5), 3);
     }
 
     #[test]

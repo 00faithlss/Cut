@@ -250,7 +250,7 @@ impl Studio {
             }
             if !binding.valid() {
                 self.flash =
-                    "Para guardar, usa una tecla F, numpad o una letra con Ctrl/Alt.".into();
+                    "Para guardar, usa una tecla F, del teclado numérico o una combinación con Ctrl o Alt.".into();
                 return;
             }
             self.controller.send(C::Hotkey(binding));
