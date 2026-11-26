@@ -8,7 +8,7 @@ use std::{
 use ::mp4::{
     AacConfig, AvcConfig, Bytes, ChannelConfig, Mp4Config, Mp4Sample, Mp4Writer, TrackConfig,
 };
-use win_native_media::encoder::{ParameterSets, mf_h264::iter_annex_b_nals};
+use win_native_media::encoder::ParameterSets;
 
 use crate::{
     audio::History,
@@ -134,7 +134,7 @@ pub fn write(
             .max(1);
         frame.read_into(&mut packet)?;
         let mut avcc = Vec::with_capacity(packet.len());
-        for nalu in iter_annex_b_nals(&packet).filter(|nalu| !nalu.is_empty()) {
+        for nalu in crate::annex_b::units(&packet).filter(|nalu| !nalu.is_empty()) {
             avcc.extend_from_slice(&u32::try_from(nalu.len())?.to_be_bytes());
             avcc.extend_from_slice(nalu);
         }

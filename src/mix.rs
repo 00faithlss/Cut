@@ -17,6 +17,7 @@ pub struct Mix {
     channels: u16,
     encoder: AacEncoder,
     pending: BTreeMap<u64, Box<[i32; FRAMES * 2]>>,
+    spare: Option<Box<[i32; FRAMES * 2]>>,
     rendered_until: u64,
     encoded: Vec<EncodedAudio>,
     delay_frames: u64,
@@ -36,6 +37,7 @@ impl Mix {
                 if channels == 1 { 96_000 } else { 128_000 },
             )?,
             pending: BTreeMap::new(),
+            spare: None,
             rendered_until: 0,
             encoded: Vec::new(),
             delay_frames: DELAY_FRAMES,
@@ -67,10 +69,11 @@ impl Mix {
             let count = (FRAMES - offset).min(data.len() / width);
             let (samples, rest) = data.split_at(count * width);
             if index >= self.rendered_until {
-                let pcm = self
-                    .pending
-                    .entry(index)
-                    .or_insert_with(|| Box::new([0; FRAMES * 2]));
+                let pcm = self.pending.entry(index).or_insert_with(|| {
+                    self.spare
+                        .take()
+                        .unwrap_or_else(|| Box::new([0; FRAMES * 2]))
+                });
                 for (n, frame) in samples.chunks_exact(width).enumerate() {
                     let left = i16::from_le_bytes([frame[0], frame[1]]);
                     let right = if channels == 1 {
@@ -99,7 +102,7 @@ impl Mix {
             .first_key_value()
             .is_some_and(|(&index, _)| index < ready)
         {
-            let (index, block) = self.pending.pop_first().unwrap();
+            let (index, mut block) = self.pending.pop_first().unwrap();
             self.rendered_until = index + 1;
             let mut pcm = [0; FRAMES * 4];
             for (i, sample) in block[..samples].iter().enumerate() {
@@ -107,7 +110,13 @@ impl Mix {
                 peak = peak.max(value.unsigned_abs());
                 pcm[i * 2..i * 2 + 2].copy_from_slice(&(value as i16).to_le_bytes());
             }
-            let timestamp = Duration::from_nanos(index * FRAMES as u64 * 1_000_000_000 / RATE);
+            if self.spare.is_none() {
+                block[..samples].fill(0);
+                self.spare = Some(block);
+            }
+            let timestamp = Duration::from_nanos(
+                (u128::from(index) * FRAMES as u128 * FRAME_NS / u128::from(RATE)) as u64,
+            );
             self.encoder
                 .encode(&pcm[..samples * 2], timestamp, &mut self.encoded)?;
             history.packets.extend(self.encoded.drain(..).map(Arc::new));
@@ -120,6 +129,18 @@ impl Mix {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conserva_el_reloj_aac_despues_de_cinco_dias() -> Result<()> {
+        let mut mix = Mix::new(2)?;
+        let mut history = mix.new_history("Prueba");
+        let at = Duration::from_secs(5 * 24 * 3600);
+        mix.add(at, &vec![0; FRAMES * 4 * 12], 2);
+        mix.render(at + Duration::from_secs(1), &mut history)?;
+        let last = history.packets.back().expect("Falta audio codificado");
+        assert!(last.timestamp >= at && last.timestamp < at + Duration::from_secs(1));
+        Ok(())
+    }
 
     #[test]
     fn mezcla_conserva_microfono_que_llega_despues_del_audio_de_aplicacion() -> Result<()> {

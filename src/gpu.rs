@@ -5,7 +5,7 @@ use std::{
 };
 use win_native_media::{
     VideoConfig,
-    encoder::{EncodedSample, ParameterSets, mf_h264::iter_annex_b_nals},
+    encoder::{EncodedSample, ParameterSets},
 };
 use windows::{
     Win32::{
@@ -261,7 +261,7 @@ impl Encoder {
             let data = std::slice::from_raw_parts(ptr, len as usize).to_vec();
             bytes.Unlock()?;
             let mut is_keyframe = false;
-            for nal in iter_annex_b_nals(&data).filter(|nal| !nal.is_empty()) {
+            for nal in crate::annex_b::units(&data).filter(|nal| !nal.is_empty()) {
                 match nal[0] & 31 {
                     5 => is_keyframe = true,
                     7 => self.parameters.sps = nal.to_vec(),

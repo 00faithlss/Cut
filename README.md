@@ -8,7 +8,7 @@
 
 ## Primer clip
 
-1. Descarga y ejecuta `Cut-<versión>-Setup-x64.exe`. Necesitas Windows 11 de 64 bits y una GPU con codificación H.264 por hardware. El instalador prepara WebView2 si hace falta.
+1. Descarga y ejecuta `Cut-<versión>-Setup-x64.exe`. Necesitas Windows 10 22H2 actualizado o Windows 11, de 64 bits, y una GPU con codificación H.264 por hardware. El instalador prepara WebView2 si hace falta.
 2. Abre Cut. La primera vez empieza a capturar la pantalla principal. En **Clips** puedes cambiar la fuente, la calidad y la duración del replay.
 3. Pulsa **F9** o **Guardar clip**. Cut emite un sonido breve cuando termina de guardar el MP4 en `Videos\Cut`.
 
@@ -16,7 +16,7 @@ Puedes cambiar el destino en **Clips → Carpeta de clips**. Para reasignar F9, 
 
 ## Video y audio
 
-- **Video.** Captura una ventana o el monitor completo. Elige entre 720p y 2160p, de 30 a 120 FPS y de 10 a 80 Mb/s. La cadencia real depende de la fuente, la GPU y la carga del equipo. La salida es 16:9 y las fuentes 4:3 se estiran para llenar el cuadro.
+- **Video.** Captura una ventana o el monitor completo. Elige entre 720p y 2160p, de 30 a 120 FPS y de 10 a 80 Mb/s. La cadencia real depende de la fuente, la GPU y la carga del equipo. La salida es 16:9 y las fuentes 4:3 se estiran para llenar el cuadro. Windows puede mostrar un contorno alrededor de la ventana que se está capturando.
 - **Mezclador.** Las aplicaciones aparecen cuando emiten audio y se ocultan al cerrar o tras tres segundos de silencio. Cut recuerda el volumen y si cada pista se incluye en los clips.
 - **Pistas de audio.** En **Clips → Pistas de audio**, elige **Una pista (mezcla)** para reunir las fuentes incluidas en una sola pista AAC. **Varias pistas** conserva la mezcla y, además, las pistas de las aplicaciones y el micrófono. Los controles del micrófono están en **Ajustes**.
 

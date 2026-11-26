@@ -111,13 +111,8 @@ impl WindowCapture {
         )?;
         let session = pool.CreateCaptureSession(&item)?;
         session.SetIsCursorCaptureEnabled(include_cursor)?;
-        if let Err(error) = session.SetIsBorderRequired(false) {
-            let _ = pool.Close();
-            return Err(format!(
-                "Windows no pudo iniciar la captura de ventana sin borde: {error}"
-            )
-            .into());
-        }
+        // Windows 10 puede mostrar el borde del sistema aunque la captura funcione.
+        let _ = session.SetIsBorderRequired(false);
         session.StartCapture()?;
         Ok(Self {
             hwnd,

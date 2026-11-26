@@ -5,7 +5,7 @@ const SAMPLES: usize = DenoiseState::FRAME_SIZE;
 const PERIOD: Duration = Duration::from_millis(10);
 
 struct Channel {
-    filter: Box<DenoiseState<'static>>,
+    filter: Option<Box<DenoiseState<'static>>>,
     input: [f32; SAMPLES],
     previous_input: [f32; SAMPLES],
     output: [f32; SAMPLES],
@@ -19,7 +19,7 @@ struct Channel {
 impl Channel {
     fn new() -> Self {
         Self {
-            filter: DenoiseState::new(),
+            filter: None,
             input: [0.; SAMPLES],
             previous_input: [0.; SAMPLES],
             output: [0.; SAMPLES],
@@ -33,7 +33,10 @@ impl Channel {
 
     fn filter(&mut self) {
         self.previous_gain = self.gain * self.noise_gain;
-        let speech = self.filter.process_frame(&mut self.output, &self.input);
+        let speech = self
+            .filter
+            .get_or_insert_with(DenoiseState::new)
+            .process_frame(&mut self.output, &self.input);
         self.presence = speech.max(self.presence * 0.92);
         let energy = self
             .output
@@ -145,13 +148,14 @@ impl Microphone {
             for channel in &mut self.channels {
                 if suppress {
                     if !self.was_suppressed && self.primed {
-                        channel.filter = DenoiseState::new();
                         channel
                             .filter
+                            .get_or_insert_with(DenoiseState::new)
                             .process_frame(&mut channel.output, &channel.previous_input);
                     }
                     channel.filter();
                 } else {
+                    channel.filter = None;
                     channel.output = channel.previous_input;
                 }
                 channel.previous_input = channel.input;
@@ -216,6 +220,25 @@ mod tests {
             / (SAMPLES * 20) as f64)
             .sqrt();
         assert!(rms < 130.0, "Ruido residual RMS {rms}");
+    }
+
+    #[test]
+    fn alterna_supresion_sin_retener_el_filtro_ni_perder_audio() {
+        let mut mic = Microphone::new(1);
+        let input = 0.125f32.to_le_bytes().repeat(SAMPLES * 2);
+        for (index, enabled) in [false, true, false, true].into_iter().enumerate() {
+            let mut pcm = Vec::new();
+            let at = Duration::from_millis(index as u64 * 20);
+            assert_eq!(
+                mic.process(&input, 1, at, 100, enabled, &mut pcm),
+                Some(at.saturating_sub(PERIOD))
+            );
+            assert_eq!(
+                pcm.len(),
+                if index == 0 { SAMPLES * 2 } else { SAMPLES * 4 }
+            );
+            assert_eq!(mic.channels[0].filter.is_some(), enabled);
+        }
     }
 
     #[test]

@@ -613,8 +613,13 @@ pub fn run(
                 });
             }
         }
-        let cutoff = clock.now()?.saturating_sub(retain + Duration::from_secs(3));
-        {
+        let reconcile = discovery || !Arc::ptr_eq(&preferences, &previous);
+        if reconcile {
+            groups.retain(|id, _| {
+                sources.iter().any(|app| &app.source.id == id)
+                    && preferences.tracks.get(id).is_none_or(|gain| gain.include)
+            });
+            let cutoff = clock.now()?.saturating_sub(retain + Duration::from_secs(3));
             let mut all = history.lock().unwrap();
             all.retain(|id, track| {
                 if id != "mix" && !sources.iter().any(|app| &app.source.id == id) {
@@ -631,13 +636,10 @@ pub fn run(
                     && (id == "mix" || groups.contains_key(id) || !track.packets.is_empty())
             });
         }
-        groups.retain(|id, _| {
-            sources.iter().any(|app| &app.source.id == id)
-                && preferences.tracks.get(id).is_none_or(|gain| gain.include)
-        });
-        if mixed_sources
-            .iter()
-            .any(|id| preferences.tracks.get(id).is_some_and(|gain| !gain.include))
+        if reconcile
+            && mixed_sources
+                .iter()
+                .any(|id| preferences.tracks.get(id).is_some_and(|gain| !gain.include))
         {
             mixed_sources.clear();
             mixed.packets.clear();
@@ -651,7 +653,9 @@ pub fn run(
                 volume: 100,
             });
             if !gain.include {
-                notices.lock().unwrap().remove(id);
+                if reconcile {
+                    notices.lock().unwrap().remove(id);
+                }
                 continue;
             }
             let is_mic = id == "mic";

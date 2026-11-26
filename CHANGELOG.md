@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.3
+
+- Menos asignaciones de memoria durante la captura H.264 y la mezcla de audio. Al guardar un clip, la captura de video puede continuar mientras se copian las pistas de audio.
+- Corrección del reloj de audio para sesiones que permanecen activas durante más de cuatro días.
+
+- Compatibilidad con Windows 10 22H2 x64 actualizado. Se conservan el mezclador por aplicación, los modos de pistas, la captura por GPU y las actualizaciones desde Cut.
+- La captura de ventanas puede iniciarse con el contorno que muestra Windows si el sistema no permite ocultarlo.
+
 ## 0.2.2
 
 - Evita capturar dos veces procesos hijos que ya están incluidos en el loopback de su aplicación principal.

@@ -211,15 +211,18 @@ impl Replay {
         }
         let (_, latest) = data.timestamps().ok_or("El replay está vacío.")?;
         check_freshness(latest, self.clock.now()?)?;
+        let parameters = data.parameters.clone();
+        let samples = data.frames().cloned().collect();
+        drop(data);
         Ok(Snapshot {
             name: clip_name::new_name(self.game_name.as_deref()),
             video: mp4::Video {
                 width,
                 height,
                 fps: self.profile.fps,
-                parameters: data.parameters.clone(),
+                parameters,
             },
-            samples: data.frames().cloned().collect(),
+            samples,
             audio: {
                 let settings = self.settings.lock().unwrap();
                 let history = self.audio.lock().unwrap();
