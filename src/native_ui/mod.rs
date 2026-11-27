@@ -672,7 +672,7 @@ impl Studio {
 
     /// Quiet status note (errors and hints from the engine). Success is never shown.
     /// It floats at the bottom of the page so appearing never pushes the layout around.
-    fn notice_toast(&self, th: &Theme) -> Option<Div> {
+    fn notice_toast(&self, th: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let text = self.state.notice.clone();
         if text.is_empty() || text.starts_with("Clip guardado") {
             return None;
@@ -680,8 +680,10 @@ impl Studio {
         let bad = text.starts_with("No se pudo")
             || text.contains("inválid")
             || text.contains("Elige un atajo");
+        let update = self.state.update.is_some() && text == "Hay una actualización disponible.";
         Some(
             div()
+                .id("notice-toast")
                 .absolute()
                 .left(px(112.))
                 .bottom(px(18.))
@@ -696,7 +698,17 @@ impl Studio {
                 .text_size(px(12.))
                 .line_height(relative(1.5))
                 .text_color(if bad { th.warn_text } else { th.secondary })
-                .child(text),
+                .child(text)
+                .when(update, |d| {
+                    d.cursor_pointer()
+                        .child(" Pulsa para descargar.")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.set_tab(Tab::Settings, cx);
+                            this.scroll_target = None;
+                            this.scroll.scroll_to_top_of_item(5);
+                        }))
+                })
+                .into_any_element(),
         )
     }
 
@@ -765,7 +777,7 @@ impl Render for Studio {
         let news = self.news.then(|| self.news_sheet(&th, cx));
         let conflict = self.conflict.map(|c| self.conflict_modal(&th, c, cx));
         let select = self.select_overlay(&th, window, cx);
-        let toast = self.notice_toast(&th);
+        let toast = self.notice_toast(&th, cx);
         div()
             .id("cut-root")
             .on_action(cx.listener(|_, _: &NextFocus, window, _| window.focus_next()))

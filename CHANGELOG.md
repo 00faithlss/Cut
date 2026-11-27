@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.2 · Hotfix
+
+- **Clips más fluidos.** Mejora la captura a 120 FPS cuando el juego mantiene la GPU ocupada.
+- **Actualización a un clic del aviso.** Pulsa la notificación para ir a la descarga y ver su progreso; al terminar, Cut instala la actualización y vuelve a abrirse.
+
 ## 0.3.1 · Hotfix
 
 - **Combinaciones para guardar clips.** Puedes asignar atajos como Ctrl + Mayús + S, Alt + Espacio o Ctrl + F9.

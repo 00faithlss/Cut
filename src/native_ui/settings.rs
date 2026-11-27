@@ -604,7 +604,20 @@ impl Studio {
                             .text_size(px(16.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(format!("Cut {}", env!("CARGO_PKG_VERSION"))),
-                    ),
+                    )
+                    .when_some(self.state.update.as_ref(), |d, update| {
+                        d.child(div().text_size(px(12.)).text_color(th.secondary).child(
+                            match self.state.progress {
+                                Some(progress) => {
+                                    format!("Descargando {} · {progress} %", update.version)
+                                }
+                                None => format!(
+                                    "Versión {} disponible. Se instalará y Cut se abrirá de nuevo.",
+                                    update.version
+                                ),
+                            },
+                        ))
+                    }),
             )
             .child(
                 ghost(th, "check-updates")
@@ -614,6 +627,9 @@ impl Studio {
                     .child(icon("refresh", 15., th.text))
                     .child(label)
                     .on_click(cx.listener(|this, _, _, cx| {
+                        if this.state.progress.is_some() {
+                            return;
+                        }
                         let command = if this.state.update.is_some() {
                             C::InstallUpdate
                         } else {

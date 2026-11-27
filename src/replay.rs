@@ -462,6 +462,12 @@ fn record_frames(
     let initial = std::time::Instant::now();
     let mut has_output = false;
     let mut last_frame = None;
+    // Prepara las superficies mientras el MFT termina el fotograma anterior.
+    // Serializar conversión y codificación reduce la cadencia con la GPU ocupada.
+    let mut prepared = std::collections::VecDeque::new();
+    // Deja cuatro de las doce muestras del pool para el MFT y la imagen retenida.
+    // CPU sólo dispone de dos texturas alternadas: no preparar varias por delante.
+    let capacity = if software { 1 } else { 8 };
     while !stop.load(Ordering::Relaxed) {
         encoder
             .poll(&mut packets)
@@ -479,8 +485,16 @@ fn record_frames(
         if !has_output && initial.elapsed() > Duration::from_secs(8) {
             return Err("El codificador no entregó fotogramas H.264.".into());
         }
+        while encoder.accepts_input() {
+            let Some((frame, timestamp)) = prepared.pop_front() else {
+                break;
+            };
+            encoder
+                .submit(&frame, timestamp)
+                .map_err(|error| format!("Entrada del codificador H.264: {error}"))?;
+        }
         let now = clock.now()?;
-        if now >= next && encoder.accepts_input() {
+        if now >= next && prepared.len() < capacity {
             let Some(input) = encoder.input_frame()? else {
                 // Deja que el codificador recupere todas las superficies si se saturó.
                 last_frame = None;
@@ -516,18 +530,16 @@ fn record_frames(
                 if now.saturating_sub(next) >= interval {
                     next = now;
                 }
-                encoder
-                    .submit(&input, next)
-                    .map_err(|error| format!("Entrada del codificador H.264: {error}"))?;
                 // Retiene la muestra para que el pool no recicle la imagen que se repite.
                 if source {
-                    last_frame = Some(input);
+                    last_frame = Some(input.clone());
                 }
+                prepared.push_back((input, next));
                 next += interval;
             }
         }
         let until_frame = next.saturating_sub(clock.now()?);
-        timer.wait(if until_frame.is_zero() {
+        timer.wait(if until_frame.is_zero() || !prepared.is_empty() {
             Duration::from_millis(1)
         } else {
             until_frame

@@ -221,7 +221,7 @@ try {
   $args='/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="'+$folder+'" /LOG="'+$env:CUT_UPDATE_LOG+'"'
   $setup=Start-Process -FilePath $file -ArgumentList $args -WindowStyle Hidden -Wait -PassThru
   if($setup.ExitCode -ne 0){throw ('El instalador terminó con código '+$setup.ExitCode)}
-  Start-Process -FilePath $env:CUT_UPDATE_EXE -WindowStyle Hidden
+  Start-Process -FilePath $env:CUT_UPDATE_EXE -WorkingDirectory $folder -WindowStyle Normal
 } catch {
   $_ | Out-String | Add-Content -LiteralPath $env:CUT_UPDATE_LOG
   Add-Type -AssemblyName System.Windows.Forms

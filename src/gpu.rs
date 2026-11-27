@@ -52,6 +52,7 @@ pub struct Encoder {
     pub parameters: ParameterSets,
 }
 
+#[derive(Clone)]
 pub struct InputFrame {
     sample: IMFSample,
     pub texture: ID3D11Texture2D,

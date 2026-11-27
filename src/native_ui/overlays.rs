@@ -11,21 +11,16 @@ use std::time::Duration;
 
 const RELEASES: &str = "https://github.com/00faithlss/Cut/releases";
 
-const ITEMS: [(&str, &str, &str); 3] = [
+const ITEMS: [(&str, &str, &str); 2] = [
     (
-        "save",
-        "Combinaciones para guardar clips",
-        "Puedes asignar atajos como Ctrl + Mayús + S, Alt + Espacio o Ctrl + F9.",
+        "film",
+        "Clips más fluidos",
+        "Mejora la captura a 120 FPS cuando el juego mantiene la GPU ocupada.",
     ),
     (
-        "key",
-        "Pulsar para hablar con cualquier tecla",
-        "Ahora puedes usar Alt, Ctrl, Mayús, Espacio, símbolos o el teclado numérico, solos o combinados.",
-    ),
-    (
-        "mic",
-        "Voz sin cortes",
-        "Tu voz ya no se corta al pulsar Mayús o Ctrl mientras hablas, y puedes guardar un clip sin soltar la tecla.",
+        "refresh",
+        "Actualización a un clic del aviso",
+        "Pulsa la notificación para ir a la descarga y ver su progreso; al terminar, Cut instala la actualización y vuelve a abrirse.",
     ),
 ];
 
