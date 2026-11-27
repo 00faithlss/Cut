@@ -27,6 +27,8 @@ mod hotkey;
 #[cfg(windows)]
 mod instance;
 #[cfg(windows)]
+mod mic_preview;
+#[cfg(windows)]
 mod microphone;
 #[cfg(windows)]
 mod mix;

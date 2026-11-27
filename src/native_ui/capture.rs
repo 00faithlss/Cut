@@ -384,11 +384,11 @@ impl Studio {
         let (label, desc): (SharedString, &str) = match binding {
             Some(b) => (
                 b.label().into(),
-                "Tu voz entra al clip solo mientras mantienes la tecla.",
+                "Tu voz entra al clip mientras mantienes las teclas o botones asignados.",
             ),
             None => (
                 "Sin tecla".into(),
-                "Tu micrófono está siempre abierto. Asigna una tecla en Ajustes.",
+                "Tu micrófono está siempre abierto. Asigna un atajo en Ajustes.",
             ),
         };
         let mic = self.gain("mic");
@@ -399,9 +399,9 @@ impl Studio {
             (true, false) => "Silenciado",
         };
         card(th)
-            .flex_row()
-            .items_center()
-            .gap(px(16.))
+            .flex_col()
+            .items_start()
+            .gap(px(12.))
             .px(px(20.))
             .py(px(18.))
             .when(talking && binding.is_some(), |d| {
@@ -419,6 +419,10 @@ impl Studio {
                     binding.is_some(),
                 )
                 .min_w(px(0.))
+                .w_full()
+                .h_auto()
+                .min_h(px(44.))
+                .py(px(10.))
                 .px(px(12.)),
             )
             .child(

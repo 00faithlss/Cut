@@ -60,28 +60,34 @@ impl Capture {
         &mut self,
         clock: &Clock,
         cursor: Option<&mut Cursor>,
-        run: impl FnOnce(&CapturedFrame) -> Result<()>,
+        run: impl FnOnce(&CapturedFrame, Option<&Cursor>) -> Result<()>,
     ) -> Result<bool> {
         match self {
             Self::Monitor(screen) => match screen.acquire_next_frame(0) {
                 Ok(frame) => {
-                    if let Some(cursor) = cursor {
+                    let cursor = if let Some(cursor) = cursor {
                         cursor.update(&frame)?;
+                        Some(&*cursor)
                     } else if frame.frame_info().LastPresentTime == 0 {
                         return Ok(false);
-                    }
-                    run(&CapturedFrame {
-                        texture: frame.texture().clone(),
-                        width: frame.width(),
-                        height: frame.height(),
-                        timestamp: clock.counter_time(frame.frame_info().LastPresentTime)?,
-                    })?;
+                    } else {
+                        None
+                    };
+                    run(
+                        &CapturedFrame {
+                            texture: frame.texture().clone(),
+                            width: frame.width(),
+                            height: frame.height(),
+                            timestamp: clock.counter_time(frame.frame_info().LastPresentTime)?,
+                        },
+                        cursor,
+                    )?;
                     Ok(true)
                 }
                 Err(Error::Timeout) => Ok(false),
                 Err(error) => Err(error.into()),
             },
-            Self::Window(window) => window.with_frame(clock, run),
+            Self::Window(window) => window.with_frame(clock, |frame| run(frame, None)),
         }
     }
 }

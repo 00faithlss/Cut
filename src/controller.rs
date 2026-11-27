@@ -63,7 +63,7 @@ fn validate_shortcuts(
 ) -> Result<(), &'static str> {
     if !save.valid() {
         return Err(
-            "Para guardar, usa una tecla F, del teclado numérico o una combinación con Ctrl o Alt.",
+            "Para guardar, usa un botón del mouse, una tecla F, del teclado numérico o una combinación con Ctrl o Alt.",
         );
     }
     if talk.is_some_and(|talk| !talk.valid_talk() || talk == save || !registered) {
@@ -81,6 +81,9 @@ pub struct State {
     pub devices: audio::Catalog,
     pub tracks: Vec<audio::Source>,
     pub levels: std::collections::HashMap<String, f64>,
+    pub mic_preview: bool,
+    pub mic_preview_ready: bool,
+    pub mic_preview_level: f64,
     pub notices: std::collections::HashMap<String, String>,
     pub seconds: u64,
     pub active: bool,
@@ -108,6 +111,8 @@ pub enum Command {
         talk: Option<crate::hotkey::Binding>,
     },
     Editing(bool),
+    MicPreview(bool),
+    MicPreviewSample(u64, crate::mic_preview::Event),
     Directory,
     ChooseDirectory(isize),
     Startup(bool),
@@ -163,6 +168,9 @@ impl Controller {
             devices: audio::Catalog::default(),
             tracks: vec![],
             levels: Default::default(),
+            mic_preview: false,
+            mic_preview_ready: false,
+            mic_preview_level: 0.,
             notices: Default::default(),
             seconds: 0,
             active: false,
@@ -219,6 +227,8 @@ impl Controller {
             });
         crate::hotkey::configure_talk(self.read(|s| s.settings.push_to_talk));
         let mut replay: Option<Replay> = None;
+        let mut mic_preview: Option<crate::mic_preview::Preview> = None;
+        let mut preview_generation = 0_u64;
         let mut retiring = false;
         let mut pending: Option<Profile> = None;
         let mut saving = false;
@@ -436,7 +446,59 @@ impl Controller {
                             );
                         });
                     }
+                    Command::MicPreview(enabled) => {
+                        preview_generation = preview_generation.wrapping_add(1);
+                        mic_preview = None;
+                        self.change(|s| {
+                            s.mic_preview = enabled && visible && !exiting;
+                            s.mic_preview_ready = false;
+                            s.mic_preview_level = 0.;
+                        });
+                        if enabled && visible && !exiting {
+                            let tx = self.tx.clone();
+                            let generation = preview_generation;
+                            match crate::mic_preview::Preview::start(
+                                Arc::clone(&settings),
+                                move |sample| {
+                                    let _ = tx.send(Command::MicPreviewSample(generation, sample));
+                                },
+                            ) {
+                                Ok(preview) => mic_preview = Some(preview),
+                                Err(error) => {
+                                    self.change(|s| s.mic_preview = false);
+                                    self.notice(format!("No se pudo probar el micrófono: {error}"));
+                                }
+                            }
+                        }
+                    }
+                    Command::MicPreviewSample(generation, sample)
+                        if generation == preview_generation && mic_preview.is_some() =>
+                    {
+                        match sample {
+                            crate::mic_preview::Event::Ready => {
+                                self.change(|s| s.mic_preview_ready = true);
+                            }
+                            crate::mic_preview::Event::Level(level) => {
+                                self.change(|s| s.mic_preview_level = level.clamp(0., 1.));
+                            }
+                            crate::mic_preview::Event::Error(error) => {
+                                mic_preview = None;
+                                preview_generation = preview_generation.wrapping_add(1);
+                                self.change(|s| {
+                                    s.mic_preview = false;
+                                    s.mic_preview_ready = false;
+                                    s.mic_preview_level = 0.;
+                                });
+                                self.notice(format!(
+                                    "No se pudo continuar la prueba de micrófono: {error}"
+                                ));
+                            }
+                        }
+                    }
                     Command::Editing(value) => {
+                        if value {
+                            self.send(Command::MicPreview(false));
+                        }
                         crate::hotkey::close_talk();
                         crate::hotkey::set_editing(value);
                         editing.store(value, std::sync::atomic::Ordering::Relaxed);
@@ -520,6 +582,7 @@ impl Controller {
                     },
                     Command::Visible(value) => {
                         if visible && !value {
+                            self.send(Command::MicPreview(false));
                             editing.store(false, std::sync::atomic::Ordering::Relaxed);
                             crate::hotkey::set_editing(false);
                             crate::hotkey::take_captured();
@@ -575,6 +638,12 @@ impl Controller {
                         }
                     },
                     Command::Exit => {
+                        mic_preview = None;
+                        self.change(|s| {
+                            s.mic_preview = false;
+                            s.mic_preview_ready = false;
+                            s.mic_preview_level = 0.;
+                        });
                         exiting = true;
                         pending = None;
                         if let Some(previous) = replay.take() {

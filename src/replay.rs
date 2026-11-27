@@ -504,22 +504,23 @@ fn record_frames(
             let source = match &mut cursor {
                 Some((bgra, target, cursor)) => {
                     // Conserva el cursor como capa independiente durante la captura del monitor.
-                    let updated = capture.with_frame(clock, Some(cursor), |frame| {
-                        Ok(bgra.stretch(frame, target, 0)?)
-                    })?;
-                    if updated {
-                        let rendered = cursor.render(target);
-                        nv12.stretch_texture(
-                            rendered,
-                            config.width,
-                            config.height,
-                            &input.texture,
-                            input.index,
-                        )?;
-                    }
-                    updated
+                    capture.with_frame(clock, Some(cursor), |frame, cursor| {
+                        if let Some(cursor) = cursor.filter(|cursor| cursor.needs_composition()) {
+                            bgra.stretch(frame, target, 0)?;
+                            nv12.stretch_texture(
+                                cursor.render(target),
+                                config.width,
+                                config.height,
+                                &input.texture,
+                                input.index,
+                            )?;
+                        } else {
+                            nv12.stretch(frame, &input.texture, input.index)?;
+                        }
+                        Ok(())
+                    })?
                 }
-                None => capture.with_frame(clock, None, |frame| {
+                None => capture.with_frame(clock, None, |frame, _| {
                     Ok(nv12.stretch(frame, &input.texture, input.index)?)
                 })?,
             };

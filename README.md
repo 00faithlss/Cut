@@ -22,16 +22,16 @@ Para cambiar la fuente, la calidad o la duración, entra en **Clips**. Para camb
 
 ## Atajos
 
-Los atajos funcionan con Cut en segundo plano o en la bandeja, también dentro del juego. Cámbialos en **Ajustes → Atajos**: haz clic en la tecla y pulsa la nueva.
+Los atajos funcionan con Cut en segundo plano o en la bandeja, también dentro del juego. Para cambiarlos, haz clic en el atajo en **Ajustes → Atajos**. Pulsa Esc para cancelar.
 
-| Acción | Qué teclas acepta |
+| Acción | Qué entradas acepta |
 | --- | --- |
-| **Guardar clip** (F9 por defecto) | Una tecla F o del teclado numérico, solas o con modificadores, o cualquier tecla combinada con Ctrl o Alt: `Ctrl + Mayús + S`, `Alt + Espacio`, `Ctrl + F9`… |
-| **Pulsar para hablar** (opcional) | Cualquier tecla, sola o combinada: `Alt`, `Ctrl`, `Mayús`, `Espacio`, símbolos, el teclado numérico… |
+| **Guardar clip** (F9 por defecto) | Botones del mouse, incluidos los laterales, teclas F o del teclado numérico, solos o con modificadores. Otras teclas se pueden combinar con Ctrl o Alt. |
+| **Pulsar para hablar** (opcional) | Teclas y botones del mouse, solos o combinados. Mantén toda la combinación y suelta para asignarla. |
 
 - Las letras solas no sirven para guardar, para que escribir no cree clips.
 - Para usar solo `Alt` (o `Ctrl`, o `Mayús`) como tecla para hablar, púlsala y suéltala sin tocar otra.
-- Con **pulsar para hablar** activo, tu voz entra al clip solo mientras mantienes la tecla. No se corta si pulsas Mayús o Ctrl mientras hablas, y puedes guardar un clip sin soltarla.
+- Con **pulsar para hablar** activo, tu voz entra al clip mientras mantienes el atajo. Puedes pulsar otras teclas o guardar un clip mientras hablas.
 - Si eliges una tecla que ya usa el otro atajo, Cut te ofrece intercambiarlos o elegir otra.
 
 ## Calidad y duración
@@ -63,7 +63,7 @@ Al pulsar F9 se guarda lo que haya en esa ventana: con 2 minutos elegidos, aprox
 - **Mezclador.** En **Captura** ves cada fuente con su interruptor para incluirla en el clip y su volumen. Cut recuerda ambos por fuente.
   - En Windows 11, cada aplicación aparece al emitir sonido y se oculta al cerrarse o tras tres segundos de silencio.
   - En Windows 10, **Audio del sistema** reúne lo que suena en el dispositivo de salida predeterminado y no permite separar aplicaciones.
-- **Micrófono.** Tiene su propia pista. En **Ajustes → Micrófono** eliges el dispositivo, el volumen de grabación y las opciones **Mono**, **Silenciar** y **Supresión** de ruido.
+- **Micrófono.** Tiene su propia pista. En **Ajustes → Micrófono** eliges el dispositivo, el volumen de grabación y las opciones **Mono**, **Silenciar** y **Supresión** de ruido. Pulsa **Escucharme** para oír tu voz mientras ajustas el micrófono, incluso con la captura en pausa.
 - **Pistas del MP4.** En **Clips → Pistas de audio**:
   - **Una pista (mezcla):** todo lo incluido en una sola pista AAC.
   - **Varias pistas:** la mezcla más una pista por aplicación y otra para el micrófono, útil para editar después. Solo la mezcla suena por defecto, para no oír el audio duplicado.

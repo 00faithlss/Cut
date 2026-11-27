@@ -176,6 +176,10 @@ impl Cursor {
         Ok(())
     }
 
+    pub fn needs_composition(&self) -> bool {
+        self.position.is_some() && self.shape.is_some()
+    }
+
     pub fn render<'a>(&'a self, desktop: &'a ID3D11Texture2D) -> &'a ID3D11Texture2D {
         let (Some((x, y)), Some(shape)) = (self.position, &self.shape) else {
             return desktop;

@@ -11,16 +11,26 @@ use std::time::Duration;
 
 const RELEASES: &str = "https://github.com/00faithlss/Cut/releases";
 
-const ITEMS: [(&str, &str, &str); 2] = [
+const ITEMS: [(&str, &str, &str); 4] = [
     (
         "film",
-        "Clips más fluidos",
-        "Mejora la captura a 120 FPS cuando el juego mantiene la GPU ocupada.",
+        "Captura con menos carga",
+        "Reduce el trabajo de la GPU cuando el cursor está oculto durante la captura de pantalla completa.",
     ),
     (
-        "refresh",
-        "Actualización a un clic del aviso",
-        "Pulsa la notificación para ir a la descarga y ver su progreso; al terminar, Cut instala la actualización y vuelve a abrirse.",
+        "cursor",
+        "Mouse en ambos atajos",
+        "Puedes asignar clic izquierdo, derecho, central o botones laterales tanto a Guardar clip como a Pulsar para Hablar.",
+    ),
+    (
+        "key",
+        "Combinaciones de voz",
+        "Combina varias teclas y botones del mouse; mantén la combinación y suelta para guardarla, o pulsa Esc para cancelar.",
+    ),
+    (
+        "mic",
+        "Escucha tu micrófono",
+        "Prueba tu voz desde Ajustes y escucha los cambios de volumen, mono y supresión de ruido, incluso con la captura en pausa.",
     ),
 ];
 

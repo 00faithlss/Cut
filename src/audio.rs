@@ -610,6 +610,17 @@ impl Input {
         clock: &Clock,
         gain: u16,
         suppress: bool,
+        output: impl FnMut(Duration, &[u8], u16),
+    ) -> Result<()> {
+        self.read_processed(clock, gain, suppress, true, output)
+    }
+
+    fn read_processed(
+        &mut self,
+        clock: &Clock,
+        gain: u16,
+        suppress: bool,
+        gate: bool,
         mut output: impl FnMut(Duration, &[u8], u16),
     ) -> Result<()> {
         while let Some(size) = self.capture.get_next_packet_size()? {
@@ -638,7 +649,7 @@ impl Input {
             };
             self.pcm.clear();
             // Keep closed-gate voice out of the noise suppressor's delayed samples too.
-            if self.microphone.is_some() && !crate::hotkey::talk_open() {
+            if gate && self.microphone.is_some() && !crate::hotkey::talk_open() {
                 self.staging[..frames as usize * input_width].fill(0);
             }
             let input = &self.staging[..frames as usize * input_width];
@@ -667,12 +678,40 @@ impl Input {
                 }
                 packet_time
             };
-            if self.microphone.is_some() && !crate::hotkey::talk_open() {
+            if gate && self.microphone.is_some() && !crate::hotkey::talk_open() {
                 self.pcm.fill(0);
             }
             output(start, &self.pcm, self.channels);
         }
         Ok(())
+    }
+}
+
+/// Flujo independiente para escucharse, sin cambiar la activación de la grabación.
+pub(crate) struct PreviewInput(Input);
+
+impl PreviewInput {
+    pub(crate) fn new(settings: &Settings) -> Result<Self> {
+        Ok(Self(Input::new(
+            InputKind::Microphone,
+            &settings.device,
+            settings.mono,
+        )?))
+    }
+
+    pub(crate) fn read(
+        &mut self,
+        clock: &Clock,
+        settings: &Settings,
+        output: impl FnMut(Duration, &[u8], u16),
+    ) -> Result<()> {
+        self.0.read_processed(
+            clock,
+            settings.gain("mic").volume,
+            settings.noise_suppression,
+            false,
+            output,
+        )
     }
 }
 
