@@ -11,7 +11,32 @@ use std::time::Duration;
 
 const RELEASES: &str = "https://github.com/00faithlss/Cut/releases";
 
-const ITEMS: [(&str, &str, &str); 4] = [
+const ITEMS: [(&str, &str, &str); 9] = [
+    (
+        "wave",
+        "Audio con menos distorsión",
+        "Atenúa los picos de la mezcla y reduce cortes al grabar.",
+    ),
+    (
+        "sliders",
+        "Pistas por aplicación",
+        "Cut comprueba si tu equipo puede separar el audio de las aplicaciones, también en Windows 10 y LTSC.",
+    ),
+    (
+        "sliders",
+        "Recuperación de pistas",
+        "Si la captura por aplicación tarda en iniciar, Cut vuelve a intentarlo durante la grabación.",
+    ),
+    (
+        "sliders",
+        "Pistas por salida de audio",
+        "Si la captura por aplicación no está disponible, puedes grabar en pistas distintas las salidas que selecciones en el mezclador.",
+    ),
+    (
+        "film",
+        "Captura más estable",
+        "Reduce los tirones cuando el historial del replay está ocupado.",
+    ),
     (
         "film",
         "Captura con menos carga",
@@ -24,8 +49,8 @@ const ITEMS: [(&str, &str, &str); 4] = [
     ),
     (
         "key",
-        "Combinaciones de voz",
-        "Combina varias teclas y botones del mouse; mantén la combinación y suelta para guardarla, o pulsa Esc para cancelar.",
+        "Combinaciones en ambos atajos",
+        "Combina teclas y botones del mouse para guardar clips o hablar, y pulsa Esc para cancelar la asignación.",
     ),
     (
         "mic",

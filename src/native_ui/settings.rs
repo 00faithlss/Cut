@@ -96,11 +96,7 @@ impl Studio {
                 .map_or("Sin tecla".into(), |b| b.label().into())
         };
         let hint: SharedString = if capturing.is_some() {
-            if capturing == Some(true) {
-                "Mantén las teclas o botones juntos y suelta para guardar. Esc cancela.".into()
-            } else {
-                "Pulsa un botón del mouse, una tecla o combinación. Esc cancela.".into()
-            }
+            "Mantén las teclas o botones juntos y suelta para asignar. Esc cancela.".into()
         } else if !self.flash.is_empty() {
             self.flash.clone()
         } else {

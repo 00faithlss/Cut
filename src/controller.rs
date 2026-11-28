@@ -62,9 +62,7 @@ fn validate_shortcuts(
     registered: bool,
 ) -> Result<(), &'static str> {
     if !save.valid() {
-        return Err(
-            "Para guardar, usa un botón del mouse, una tecla F, del teclado numérico o una combinación con Ctrl o Alt.",
-        );
+        return Err("Elige una tecla, un botón del mouse o una combinación válida para guardar.");
     }
     if talk.is_some_and(|talk| !talk.valid_talk() || talk == save || !registered) {
         return Err("Elige un atajo de voz válido y distinto al de guardar.");
@@ -216,9 +214,7 @@ impl Controller {
     fn run(self, rx: mpsc::Receiver<Command>) {
         let _com = crate::com::Mta::enter();
         let settings = Arc::new(Mutex::new(Arc::new(self.read(|s| s.settings.clone()))));
-        let binding = Arc::new(std::sync::atomic::AtomicU32::new(
-            self.read(|s| s.hotkey.packed()),
-        ));
+        let binding = Arc::new(Mutex::new(self.read(|s| s.hotkey)));
         let editing = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let key_tx = self.tx.clone();
         let registered = std::env::var_os("CUT_NATIVE_VALIDATION").is_none()
@@ -398,7 +394,7 @@ impl Controller {
                         }
                         match value.save() {
                             Ok(()) => {
-                                binding.store(value.packed(), std::sync::atomic::Ordering::Relaxed);
+                                *binding.lock().unwrap() = value;
                                 self.change(|s| {
                                     s.hotkey = value;
                                     s.notice = format!("Guardar clip → {}", value.label());
@@ -433,7 +429,7 @@ impl Controller {
                             continue;
                         }
                         *settings.lock().unwrap() = Arc::new(next.clone());
-                        binding.store(save.packed(), std::sync::atomic::Ordering::Relaxed);
+                        *binding.lock().unwrap() = save;
                         crate::hotkey::configure_talk(talk);
                         persist_at = None;
                         self.change(|s| {
@@ -983,10 +979,10 @@ mod tests {
     }
 
     #[test]
-    fn shortcut_swap_rejects_an_unmodified_letter_for_save() {
+    fn shortcut_swap_accepts_a_letter_and_rejects_duplicate_bindings() {
         let f9 = serde_json::from_str(r#"{"key":120,"modifiers":0}"#).unwrap();
         let a = serde_json::from_str(r#"{"key":65,"modifiers":0}"#).unwrap();
-        assert!(validate_shortcuts(a, Some(f9), true).is_err());
+        assert!(validate_shortcuts(a, Some(f9), true).is_ok());
         assert!(validate_shortcuts(f9, Some(a), true).is_ok());
         assert!(validate_shortcuts(f9, Some(f9), true).is_err());
         assert!(validate_shortcuts(f9, Some(a), false).is_err());

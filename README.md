@@ -26,11 +26,10 @@ Los atajos funcionan con Cut en segundo plano o en la bandeja, también dentro d
 
 | Acción | Qué entradas acepta |
 | --- | --- |
-| **Guardar clip** (F9 por defecto) | Botones del mouse, incluidos los laterales, teclas F o del teclado numérico, solos o con modificadores. Otras teclas se pueden combinar con Ctrl o Alt. |
-| **Pulsar para hablar** (opcional) | Teclas y botones del mouse, solos o combinados. Mantén toda la combinación y suelta para asignarla. |
+| **Guardar clip** (F9 por defecto) | Teclas y botones del mouse, solos o combinados, incluidos el teclado numérico y los laterales. |
+| **Pulsar para hablar** (opcional) | Teclas y botones del mouse, solos o combinados, incluidos el teclado numérico y los laterales. |
 
-- Las letras solas no sirven para guardar, para que escribir no cree clips.
-- Para usar solo `Alt` (o `Ctrl`, o `Mayús`) como tecla para hablar, púlsala y suéltala sin tocar otra.
+- Mantén las teclas y los botones de la combinación juntos y suelta para asignarla.
 - Con **pulsar para hablar** activo, tu voz entra al clip mientras mantienes el atajo. Puedes pulsar otras teclas o guardar un clip mientras hablas.
 - Si eliges una tecla que ya usa el otro atajo, Cut te ofrece intercambiarlos o elegir otra.
 
@@ -61,12 +60,12 @@ Al pulsar F9 se guarda lo que haya en esa ventana: con 2 minutos elegidos, aprox
 ## Audio
 
 - **Mezclador.** En **Captura** ves cada fuente con su interruptor para incluirla en el clip y su volumen. Cut recuerda ambos por fuente.
-  - En Windows 11, cada aplicación aparece al emitir sonido y se oculta al cerrarse o tras tres segundos de silencio.
-  - En Windows 10, **Audio del sistema** reúne lo que suena en el dispositivo de salida predeterminado y no permite separar aplicaciones.
+  - Si Windows permite iniciar la captura por aplicación, cada aplicación aparece al emitir sonido y se oculta al cerrarse o tras tres segundos de silencio.
+  - Si esa captura no está disponible, **Audio del sistema** reúne lo que suena en la salida predeterminada. Para separar el juego y Discord, envía cada uno a una salida distinta desde sus ajustes o los de Windows y activa esas salidas en el mezclador de Cut. Si seleccionas la salida predeterminada por su nombre, Cut la graba una sola vez. El micrófono sigue siendo una fuente aparte.
 - **Micrófono.** Tiene su propia pista. En **Ajustes → Micrófono** eliges el dispositivo, el volumen de grabación y las opciones **Mono**, **Silenciar** y **Supresión** de ruido. Pulsa **Escucharme** para oír tu voz mientras ajustas el micrófono, incluso con la captura en pausa.
 - **Pistas del MP4.** En **Clips → Pistas de audio**:
   - **Una pista (mezcla):** todo lo incluido en una sola pista AAC.
-  - **Varias pistas:** la mezcla más una pista por aplicación y otra para el micrófono, útil para editar después. Solo la mezcla suena por defecto, para no oír el audio duplicado.
+  - **Varias pistas:** la mezcla más una pista por fuente de sonido incluida, útil para editar después. Solo la mezcla suena por defecto, para no oír el audio duplicado.
 
 ## Ventana o pantalla completa
 
@@ -86,7 +85,7 @@ Al pulsar F9 se guarda lo que haya en esa ventana: con 2 minutos elegidos, aprox
 | Capturar pantalla completa | GPU compatible con Direct3D 11 |
 | Codificar por hardware | GPU con codificador H.264; si no, se usa la CPU hasta 1080p/30 FPS |
 | Capturar una ventana | Windows 11 |
-| Audio separado por aplicación | Windows 11; Windows 10 usa el audio del sistema |
+| Audio separado por aplicación | Depende de que WASAPI pueda abrir una captura por proceso en el equipo |
 
 Las ediciones LTSB 2015/2016, las primeras versiones de Windows 10 y Windows de 32 bits no son compatibles. El funcionamiento depende también de la GPU y sus controladores; no se han probado todas las combinaciones.
 
@@ -102,7 +101,7 @@ En **Ajustes** también puedes iniciar Cut con Windows, capturar el cursor, apag
 
 **¿Por qué no puedo capturar una ventana?** En Windows 10 y LTSC no está disponible: usa **Pantalla completa**. En Windows 11, Cut no inicia la captura de una ventana si Windows no le permite hacerlo sin el borde amarillo.
 
-**¿Por qué no veo cada aplicación en el mezclador?** Separar el audio por aplicación requiere Windows 11. En Windows 10 aparece **Audio del sistema**.
+**¿Por qué no veo cada aplicación en el mezclador?** Cuando Windows no puede iniciar la captura por proceso, el mezclador ofrece las salidas de audio. Cada salida reúne todas las aplicaciones que suenan por ella; con **Varias pistas** puedes editar cada salida seleccionada y el micrófono por separado.
 
 **¿Por qué un clip antiguo se ve lavado en VLC?** Desde 0.3.0, Cut indica en el MP4 cómo interpretar los colores para que los reproductores los muestren bien. Los clips guardados antes no cambian. El contenido HDR no está validado.
 
@@ -125,7 +124,7 @@ Necesitas Rust estable con la toolchain MSVC y el SDK de Windows (Visual Studio 
 - **Interfaz:** nativa en Rust con [GPUI](https://www.gpui.rs/), sin navegador incrustado.
 - **Captura:** DXGI Desktop Duplication para el monitor y Windows Graphics Capture para ventanas.
 - **Video:** Direct3D 11 escala y convierte a NV12 BT.709 de rango limitado en la GPU. Media Foundation codifica a H.264 por hardware o, como respaldo, con el [codificador H.264 de Windows](https://learn.microsoft.com/en-us/windows/win32/medfound/h-264-video-encoder) por CPU. El rango, las primarias y la transferencia se declaran en el MP4.
-- **Audio:** WASAPI, con [loopback por proceso](https://learn.microsoft.com/en-us/samples/microsoft/windows-classic-samples/applicationloopbackaudio-sample/) en Windows 11 y [loopback del sistema](https://learn.microsoft.com/en-us/windows/win32/coreaudio/loopback-recording) en Windows 10.
+- **Audio:** WASAPI, con [loopback por proceso](https://learn.microsoft.com/en-us/samples/microsoft/windows-classic-samples/applicationloopbackaudio-sample/) cuando se puede abrir y [loopback del sistema](https://learn.microsoft.com/en-us/windows/win32/coreaudio/loopback-recording) como respaldo.
 - **Replay:** H.264 y AAC comprimidos en RAM dentro de una ventana móvil. Solo se escribe al disco el MP4 al guardar.
 
 Los límites de compatibilidad vienen de las APIs de Microsoft para [capturar ventanas](https://learn.microsoft.com/en-us/windows/win32/api/windows.graphics.capture.interop/nf-windows-graphics-capture-interop-igraphicscaptureiteminterop-createforwindow) y [controlar el cursor](https://learn.microsoft.com/en-us/uwp/api/windows.graphics.capture.graphicscapturesession.iscursorcaptureenabled). La interfaz necesita además DirectWrite de Windows 10 Creators Update o posterior.

@@ -2,9 +2,14 @@
 
 ## 0.3.3
 
+- **Audio con menos distorsión.** Atenúa los picos de la mezcla y reduce cortes al grabar.
+- **Pistas por aplicación.** Cut comprueba si tu equipo puede separar el audio de las aplicaciones, también en Windows 10 y LTSC.
+- **Recuperación de pistas.** Si la captura por aplicación tarda en iniciar, Cut vuelve a intentarlo durante la grabación.
+- **Pistas por salida de audio.** Si la captura por aplicación no está disponible, puedes grabar en pistas distintas las salidas que selecciones en el mezclador.
+- **Captura más estable.** Reduce los tirones cuando el historial del replay está ocupado.
 - **Captura con menos carga.** Reduce el trabajo de la GPU cuando el cursor está oculto durante la captura de pantalla completa.
 - **Mouse en ambos atajos.** Puedes asignar clic izquierdo, derecho, central o botones laterales tanto a Guardar clip como a Pulsar para Hablar.
-- **Combinaciones de voz.** Combina varias teclas y botones del mouse; mantén la combinación y suelta para guardarla, o pulsa Esc para cancelar.
+- **Combinaciones en ambos atajos.** Combina teclas y botones del mouse para guardar clips o hablar, y pulsa Esc para cancelar la asignación.
 - **Escucha tu micrófono.** Prueba tu voz desde Ajustes y escucha los cambios de volumen, mono y supresión de ruido, incluso con la captura en pausa.
 
 ## 0.3.2 · Hotfix

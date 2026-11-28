@@ -59,9 +59,9 @@ fn physical_key(virtual_key: u32, scan: u32, extended: bool) -> u8 {
 }
 
 struct Shortcut {
-    binding: Arc<AtomicU32>,
+    binding: Arc<Mutex<Binding>>,
     editing: Arc<AtomicBool>,
-    key: KeyPress,
+    save: SaveGate,
     trigger: Box<dyn Fn()>,
     talk: TalkGate,
     talk_binding: Option<Binding>,
@@ -73,13 +73,10 @@ struct Shortcut {
     swallowed_mouse: u8,
     swallowed_windows: u8,
     talk_generation: u32,
-    /// While editing: a modifier key pressed alone, captured if it is released alone.
-    lone_modifier: Option<u8>,
 }
 
 static TALK_BINDING: Mutex<Option<Binding>> = Mutex::new(None);
 static TALK_KEYS: Mutex<[u8; 256]> = Mutex::new([0; 256]);
-static EDITING_TALK: AtomicBool = AtomicBool::new(false);
 static CAPTURE_GENERATION: AtomicU32 = AtomicU32::new(0);
 static CAPTURE_BLOCKED: Mutex<[bool; 256]> = Mutex::new([false; 256]);
 static TALK_OPEN: AtomicBool = AtomicBool::new(false);
@@ -107,19 +104,16 @@ pub fn set_talk_preview(open: bool) {
     );
 }
 
-pub fn set_editing_talk(editing: bool) {
-    EDITING_TALK.store(editing, Ordering::SeqCst);
+pub fn set_editing(editing: bool) {
+    if TALK_EDITING.swap(editing, Ordering::SeqCst) == editing {
+        return;
+    }
     *CAPTURED.lock().unwrap() = None;
     let mut blocked = CAPTURE_BLOCKED.lock().unwrap();
     for key in 1..256 {
         blocked[key] = unsafe { GetAsyncKeyState(key as i32) < 0 };
     }
     CAPTURE_GENERATION.fetch_add(1, Ordering::SeqCst);
-    close_talk();
-}
-
-pub fn set_editing(editing: bool) {
-    TALK_EDITING.store(editing, Ordering::SeqCst);
     close_talk();
 }
 
@@ -246,12 +240,25 @@ fn empty_keys(keys: &[u64; 4]) -> bool {
 
 impl Binding {
     fn keys(self) -> impl Iterator<Item = u8> {
-        (1..=254u8).filter(move |key| {
-            *key == self.key || self.extra_keys[usize::from(*key) / 64] & (1u64 << (*key % 64)) != 0
+        let mut keys = self.extra_keys;
+        keys[usize::from(self.key) / 64] |= 1u64 << (self.key % 64);
+        keys.into_iter().enumerate().flat_map(|(word, mut bits)| {
+            std::iter::from_fn(move || {
+                if bits == 0 {
+                    return None;
+                }
+                let key = word * 64 + bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                Some(key as u8)
+            })
         })
     }
     fn contains(self, key: u8) -> bool {
-        self.keys().any(|required| required == key)
+        self.key == key || self.extra_keys[usize::from(key) / 64] & (1u64 << (key % 64)) != 0
+    }
+    fn required_modifiers(self) -> u8 {
+        self.keys()
+            .fold(self.modifiers, |flags, key| flags | own_modifiers(key))
     }
 
     pub fn label(self) -> String {
@@ -327,9 +334,9 @@ impl Binding {
         self.modifiers <= 15
             && self.key != 0
             && self.key != 0xff
-            && self.keys().all(|key| !matches!(key, 0x07 | 0x1b))
-            && self.extra_keys[0] & 1 == 0
-            && self.extra_keys[3] & (1u64 << 63) == 0
+            && self
+                .keys()
+                .all(|key| !matches!(key, 0 | 0x07 | 0x1b | 0xff))
     }
     const REGISTRY_KEY: &str = r"Software\Cut";
     const VALUE: &str = "ClipHotkey";
@@ -339,7 +346,7 @@ impl Binding {
         extra_keys: [0; 4],
     };
 
-    pub fn packed(self) -> u32 {
+    fn packed(self) -> u32 {
         u32::from(self.key) | (u32::from(self.modifiers) << 8)
     }
 
@@ -351,31 +358,28 @@ impl Binding {
         }
     }
 
-    /// Para guardar se admiten los botones del mouse, teclas F y teclado numérico,
-    /// o combinaciones de teclado con Ctrl o Alt. Escape cancela la asignación.
     pub fn valid(self) -> bool {
-        empty_keys(&self.extra_keys)
-            && self.modifiers <= 7
-            && match self.key {
-                0x01
-                | 0x02
-                | 0x04..=0x06
-                | 112..=135
-                | 0x60..=0x6b
-                | 0x6d..=0x6f
-                | NUMPAD_ENTER => true,
-                0 | 0x01..=0x07 | 0x10..=0x12 | 0x1b | 0x5b | 0x5c | 0xa0..=0xa5 | 0xff => false,
-                _ => self.modifiers & 3 != 0,
-            }
+        self.valid_talk()
     }
 
     pub fn load() -> Self {
         RegKey::predef(HKEY_CURRENT_USER)
             .open_subkey(Self::REGISTRY_KEY)
-            .and_then(|key| key.get_value::<u32, _>(Self::VALUE))
+            .map(|key| Self::load_from(&key))
             .ok()
-            .filter(|value| *value <= u32::from(u16::MAX))
-            .map(Self::unpack)
+            .unwrap_or(Self::DEFAULT)
+    }
+
+    fn load_from(key: &RegKey) -> Self {
+        key.get_value::<String, _>(Self::VALUE)
+            .ok()
+            .and_then(|value| serde_json::from_str::<Self>(&value).ok())
+            .or_else(|| {
+                key.get_value::<u32, _>(Self::VALUE)
+                    .ok()
+                    .filter(|value| *value <= u32::from(u16::MAX))
+                    .map(Self::unpack)
+            })
             .filter(|binding| binding.valid())
             .unwrap_or(Self::DEFAULT)
     }
@@ -384,16 +388,24 @@ impl Binding {
         if !self.valid() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "Usa un botón del mouse, una tecla F, del teclado numérico o una combinación con Ctrl o Alt.",
+                "Elige una tecla, un botón del mouse o una combinación válida.",
             ));
         }
         let (key, _) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(Self::REGISTRY_KEY)?;
-        key.set_value(Self::VALUE, &self.packed())
+        self.save_to(&key)
+    }
+
+    fn save_to(self, key: &RegKey) -> std::io::Result<()> {
+        if empty_keys(&self.extra_keys) {
+            key.set_value(Self::VALUE, &self.packed())
+        } else {
+            key.set_value(Self::VALUE, &serde_json::to_string(&self)?)
+        }
     }
 }
 
 pub fn listen(
-    binding: Arc<AtomicU32>,
+    binding: Arc<Mutex<Binding>>,
     editing: Arc<AtomicBool>,
     trigger: impl Fn() + Send + 'static,
 ) -> bool {
@@ -405,7 +417,7 @@ pub fn listen(
                 shortcut.replace(Some(Shortcut {
                     binding,
                     editing,
-                    key: KeyPress::default(),
+                    save: SaveGate::default(),
                     trigger: Box::new(trigger),
                     talk: TalkGate::default(),
                     talk_binding: None,
@@ -417,7 +429,6 @@ pub fn listen(
                     swallowed_mouse: 0,
                     swallowed_windows: 0,
                     talk_generation: 0,
-                    lone_modifier: None,
                 }));
             });
             let hooks = unsafe {
@@ -475,9 +486,7 @@ unsafe extern "system" fn on_key(code: i32, message: WPARAM, data: LPARAM) -> LR
                     state.swallowed_windows &= !bit;
                     return swallowed;
                 }
-                if (TALK_EDITING.load(Ordering::SeqCst) || state.editing.load(Ordering::SeqCst))
-                    && EDITING_TALK.load(Ordering::SeqCst)
-                {
+                if TALK_EDITING.load(Ordering::SeqCst) || state.editing.load(Ordering::SeqCst) {
                     state.swallowed_windows |= bit;
                     return true;
                 }
@@ -563,19 +572,14 @@ fn input_event(physical: u8, virtual_key: u8, released: bool) {
         let generation = CAPTURE_GENERATION.load(Ordering::SeqCst);
         if generation != shortcut.capture_generation {
             shortcut.capture_generation = generation;
-            shortcut.lone_modifier = None;
             shortcut.chord = CaptureChord::default();
             shortcut.chord.blocked = *CAPTURE_BLOCKED.lock().unwrap();
         }
         if TALK_EDITING.load(Ordering::SeqCst) || shortcut.editing.load(Ordering::Relaxed) {
             TALK_OPEN.store(false, Ordering::SeqCst);
             shortcut.talk.open = false;
-            let captured = if EDITING_TALK.load(Ordering::SeqCst) {
-                shortcut.chord.event(physical, virtual_key, released)
-            } else {
-                shortcut.capture(physical, released)
-            };
-            if let Some(binding) = captured {
+            shortcut.save = SaveGate::default();
+            if let Some(binding) = shortcut.chord.event(physical, virtual_key, released) {
                 *CAPTURED.lock().unwrap() = Some(binding);
             }
             return;
@@ -630,21 +634,18 @@ fn input_event(physical: u8, virtual_key: u8, released: bool) {
             }
             TALK_OPEN.store(shortcut.talk.open, Ordering::SeqCst);
         }
-        if released && shortcut.key.held == Some(physical) {
-            shortcut.key.held = None;
-        }
-        let binding = Binding::unpack(shortcut.binding.load(Ordering::Relaxed));
+        let binding = *shortcut.binding.lock().unwrap();
         let talking_with = talk_binding
             .filter(|_| shortcut.talk.open)
-            .map_or(0, |binding| {
-                binding
-                    .keys()
-                    .fold(binding.modifiers, |flags, key| flags | own_modifiers(key))
-            });
-        if physical == binding.key
-            && shortcut.key.press(binding.key, released)
-            && held & !(talking_with & !binding.modifiers) == binding.modifiers
-        {
+            .map_or(0, Binding::required_modifiers);
+        if shortcut.save.event(
+            binding,
+            &shortcut.pressed,
+            physical,
+            released,
+            held,
+            talking_with,
+        ) {
             (shortcut.trigger)();
         }
     });
@@ -721,55 +722,6 @@ impl CaptureChord {
     }
 }
 
-impl Shortcut {
-    /// A key pressed while a shortcut is being edited. Ordinary keys are taken on
-    /// press, together with the modifiers held. A modifier (Alt, Ctrl, Mayús) is taken
-    /// alone when it is released without any other key in between, so Alt can be the
-    /// talk key and Alt + T still works as a combination.
-    fn capture(&mut self, key: u8, released: bool) -> Option<Binding> {
-        capture_key(&mut self.lone_modifier, key, released, held_modifiers)
-    }
-}
-
-fn capture_key(
-    lone: &mut Option<u8>,
-    key: u8,
-    released: bool,
-    held: impl Fn() -> u8,
-) -> Option<Binding> {
-    match key {
-        // Windows keys open Start; never a shortcut.
-        0x5b | 0x5c => {
-            *lone = None;
-            None
-        }
-        0x10..=0x12 | 0xa0..=0xa5 => {
-            if !released {
-                *lone = Some(key);
-                None
-            } else if *lone == Some(key) {
-                *lone = None;
-                Some(Binding {
-                    key,
-                    modifiers: 0,
-                    extra_keys: [0; 4],
-                })
-            } else {
-                None
-            }
-        }
-        _ if released => None,
-        _ => {
-            *lone = None;
-            Some(Binding {
-                key,
-                modifiers: held(),
-                extra_keys: [0; 4],
-            })
-        }
-    }
-}
-
 /// The character a punctuation key types on the current keyboard layout.
 fn layout_char(key: u8) -> Option<String> {
     let value = unsafe { MapVirtualKeyW(u32::from(key), MAPVK_VK_TO_CHAR) } & 0xffff;
@@ -779,15 +731,41 @@ fn layout_char(key: u8) -> Option<String> {
 }
 
 #[derive(Default)]
-struct KeyPress {
-    held: Option<u8>,
+struct SaveGate {
+    binding: Option<Binding>,
+    fired: bool,
 }
 
-impl KeyPress {
-    fn press(&mut self, key: u8, released: bool) -> bool {
-        let was_held = self.held == Some(key);
-        self.held = (!released).then_some(key);
-        !was_held && !released
+impl SaveGate {
+    fn event(
+        &mut self,
+        binding: Binding,
+        pressed: &[bool; 256],
+        key: u8,
+        released: bool,
+        held: u8,
+        talking_with: u8,
+    ) -> bool {
+        if self.binding != Some(binding) {
+            self.binding = Some(binding);
+            self.fired = false;
+        }
+        let required = binding.required_modifiers();
+        if held & required != required || !binding.keys().all(|key| pressed[key as usize]) {
+            self.fired = false;
+            return false;
+        }
+        if released
+            || self.fired
+            || !(binding.contains(key) || modifier_bit(key) & binding.modifiers != 0)
+        {
+            return false;
+        }
+        if held & !(talking_with & !required) != required {
+            return false;
+        }
+        self.fired = true;
+        true
     }
 }
 
@@ -827,48 +805,27 @@ mod tests {
     }
 
     #[test]
-    fn alt_solo_sirve_para_hablar_y_alt_mas_tecla_sigue_siendo_combinacion() {
-        let mut lone = None;
-        // Alt pulsado y soltado sin nada en medio: se toma Alt solo.
-        assert_eq!(capture_key(&mut lone, 0xa4, false, || 2), None);
-        assert_eq!(
-            capture_key(&mut lone, 0xa4, true, || 0),
-            Some(Binding {
-                key: 0xa4,
-                modifiers: 0,
-                extra_keys: [0; 4]
-            })
-        );
-        // Alt + T: se toma la combinación y soltar Alt después no cambia nada.
-        assert_eq!(capture_key(&mut lone, 0xa4, false, || 2), None);
-        assert_eq!(
-            capture_key(&mut lone, b'T', false, || 2),
-            Some(Binding {
-                key: b'T',
-                modifiers: 2,
-                extra_keys: [0; 4]
-            })
-        );
-        assert_eq!(capture_key(&mut lone, 0xa4, true, || 0), None);
-        // Alt Gr envía un Ctrl izquierdo falso: cuenta el último modificador.
-        assert_eq!(capture_key(&mut lone, 0xa2, false, || 1), None);
-        assert_eq!(capture_key(&mut lone, 0xa5, false, || 3), None);
-        assert_eq!(capture_key(&mut lone, 0xa2, true, || 2), None);
-        assert_eq!(
-            capture_key(&mut lone, 0xa5, true, || 0),
-            Some(Binding {
-                key: 0xa5,
-                modifiers: 0,
-                extra_keys: [0; 4]
-            })
-        );
-        // Las teclas Windows nunca se toman.
-        assert_eq!(capture_key(&mut lone, 0x5b, false, || 8), None);
-        assert_eq!(capture_key(&mut lone, 0x5b, true, || 0), None);
+    fn captura_alt_alt_gr_y_tecla_windows() {
+        for (keys, expected, modifiers) in [
+            (&[0xa4][..], 0xa4, 0),
+            (&[0xa4, b'T'], b'T', 2),
+            (&[0xa2, 0xa5], 0xa5, 0),
+            (&[0x5b], 0x5b, 0),
+        ] {
+            let mut capture = CaptureChord::default();
+            for &key in keys {
+                assert!(capture.event(key, key, false).is_none());
+            }
+            let first = keys[0];
+            let binding = capture.event(first, first, true).unwrap();
+            assert_eq!(binding.key, expected);
+            assert_eq!(binding.modifiers, modifiers);
+            assert!(binding.valid());
+        }
     }
 
     #[test]
-    fn guardar_admite_combinaciones_con_ctrl_o_alt() {
+    fn guardar_admite_teclas_solas_y_combinaciones() {
         let ok = |key, modifiers| {
             Binding {
                 key,
@@ -883,12 +840,12 @@ mod tests {
         assert!(ok(0x60, 4)); // Mayús + Num 0
         assert!(ok(0xc0, 1 | 2)); // Ctrl + Alt + Ñ
         assert!(ok(0x25, 1)); // Ctrl + ←
-        assert!(!ok(b'S', 0)); // escribir no guarda
-        assert!(!ok(b'S', 4)); // Mayús + S tampoco
-        assert!(!ok(0x20, 0));
-        assert!(!ok(0xa4, 0)); // Alt solo
+        assert!(ok(b'S', 0));
+        assert!(ok(b'S', 4));
+        assert!(ok(0x20, 0));
+        assert!(ok(0xa4, 0));
         assert!(!ok(0x1b, 1));
-        assert!(!ok(b'S', 8)); // con Windows
+        assert!(ok(b'S', 8));
     }
 
     #[test]
@@ -1058,7 +1015,7 @@ mod tests {
             assert_eq!(Binding::unpack(binding.packed()), binding);
         }
         assert!(
-            !Binding {
+            Binding {
                 key: b'1',
                 modifiers: 0,
                 extra_keys: [0; 4]
@@ -1068,29 +1025,23 @@ mod tests {
     }
 
     #[test]
-    fn atajo_guarda_una_vez_y_admite_cambiar_de_tecla() {
-        let mut state = KeyPress::default();
-        assert!(state.press(Binding::DEFAULT.key, false));
-        assert!(!state.press(Binding::DEFAULT.key, false));
-        assert!(state.press(b'X', false));
-        assert!(!state.press(b'X', true));
-        assert!(state.press(b'X', false));
+    fn atajo_guarda_una_vez_por_combinacion_completa() {
+        let mut capture = CaptureChord::default();
+        capture.event(5, 5, false);
+        capture.event(b'Q', b'Q', false);
+        let binding = capture.event(5, 5, true).unwrap();
+        let mut gate = SaveGate::default();
+        let mut pressed = [false; 256];
+        assert!(binding.valid());
+        pressed[5] = true;
+        assert!(!gate.event(binding, &pressed, 5, false, 0, 0));
+        pressed[b'Q' as usize] = true;
+        assert!(gate.event(binding, &pressed, b'Q', false, 0, 0));
+        assert!(!gate.event(binding, &pressed, b'Q', false, 0, 0));
+        pressed[5] = false;
+        assert!(!gate.event(binding, &pressed, 5, true, 0, 0));
+        pressed[5] = true;
+        assert!(gate.event(binding, &pressed, 5, false, 0, 0));
         assert_eq!(Binding::unpack(Binding::DEFAULT.packed()), Binding::DEFAULT);
-        assert!(
-            Binding {
-                key: b'X',
-                modifiers: 1,
-                extra_keys: [0; 4]
-            }
-            .valid()
-        );
-        assert!(
-            !Binding {
-                key: b'X',
-                modifiers: 0,
-                extra_keys: [0; 4]
-            }
-            .valid()
-        );
     }
 }

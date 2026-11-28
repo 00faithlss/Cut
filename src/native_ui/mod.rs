@@ -202,9 +202,7 @@ impl Studio {
     fn begin_edit(&mut self, talk: bool) {
         self.stop_talk_preview();
         self.controller.send(C::MicPreview(false));
-        crate::hotkey::set_editing_talk(talk);
         crate::hotkey::set_editing(true);
-        crate::hotkey::take_captured();
         self.editing = Some(talk);
         self.flash = "".into();
         self.controller.send(C::Editing(true));
@@ -212,7 +210,6 @@ impl Studio {
 
     fn cancel_edit(&mut self, message: &str) {
         if self.editing.take().is_some() {
-            crate::hotkey::set_editing_talk(false);
             crate::hotkey::set_editing(false);
             crate::hotkey::take_captured();
             self.controller.send(C::Editing(false));
@@ -255,8 +252,7 @@ impl Studio {
                 return;
             }
             if !binding.valid() {
-                self.flash =
-                    "Para guardar, usa un botón del mouse, una tecla F, del teclado numérico o una combinación con Ctrl o Alt.".into();
+                self.flash = "Elige una tecla, un botón del mouse o una combinación válida.".into();
                 return;
             }
             self.controller.send(C::Hotkey(binding));
@@ -983,7 +979,6 @@ pub fn run() -> crate::replay::Result<()> {
                                             redraw = true;
                                             if let Some(binding) = crate::hotkey::take_captured() {
                                                 this.editing = None;
-                                                crate::hotkey::set_editing_talk(false);
                                                 crate::hotkey::set_editing(false);
                                                 this.controller.send(C::Editing(false));
                                                 if binding.is_escape() {

@@ -457,7 +457,7 @@ pub fn run() -> Result<()> {
     let mut web = Some(create_webview(&window, event_proxy.clone())?);
 
     let mut clip_hotkey = crate::hotkey::Binding::load();
-    let hotkey_binding = Arc::new(std::sync::atomic::AtomicU32::new(clip_hotkey.packed()));
+    let hotkey_binding = Arc::new(Mutex::new(clip_hotkey));
     let hotkey_editing = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let hotkey_proxy = event_proxy.clone();
     let registered = crate::hotkey::listen(
@@ -775,7 +775,7 @@ pub fn run() -> Result<()> {
                 }
                 match binding.save() {
                     Ok(()) => {
-                        hotkey_binding.store(binding.packed(), std::sync::atomic::Ordering::Relaxed);
+                        *hotkey_binding.lock().unwrap() = binding;
                         clip_hotkey = binding;
                         hotkey_editing.store(false, std::sync::atomic::Ordering::Relaxed);
                         update(&web, "hotkey", binding);

@@ -11,7 +11,10 @@ use std::{
 };
 
 use serde::Deserialize;
-use win_native_media::{CaptureTarget, VideoConfig};
+use win_native_media::{
+    CaptureTarget, VideoConfig,
+    encoder::{EncodedSample, ParameterSets},
+};
 use windows::{
     Win32::{
         Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0},
@@ -172,7 +175,7 @@ impl Replay {
             let clock = Arc::clone(&clock);
             let include_cursor = profile.cursor;
             move || {
-                if let Err(error) = record_frames(
+                if let Err(error) = record(
                     RecordingRequest {
                         target,
                         config,
@@ -304,7 +307,7 @@ impl Replay {
                         history
                             .iter()
                             .filter(|(id, _)| settings.gain(id).include)
-                            .map(|(_, track)| track.clone())
+                            .map(|(id, track)| (id.clone(), track.clone()))
                             .collect(),
                     ),
                 }
@@ -368,8 +371,8 @@ impl Snapshot {
                 .saturating_duration_since(std::time::Instant::now()),
         );
         let live = self.audio_history.lock().unwrap();
-        let extend = |track: &mut audio::History| {
-            if let Some(current) = live.values().find(|current| current.name == track.name) {
+        let extend = |id: &str, track: &mut audio::History| {
+            if let Some(current) = live.get(id) {
                 let last = track.packets.back().map(|packet| packet.timestamp);
                 track.packets.extend(
                     current
@@ -383,12 +386,16 @@ impl Snapshot {
         match &mut self.audio {
             mp4::Audio::Mixed(mix) => {
                 if let Some(track) = mix {
-                    extend(track);
+                    extend("mix", track);
                 } else {
                     *mix = live.get("mix").cloned();
                 }
             }
-            mp4::Audio::Separate(tracks) => tracks.iter_mut().for_each(extend),
+            mp4::Audio::Separate(tracks) => {
+                for (id, track) in tracks {
+                    extend(id, track);
+                }
+            }
         }
         drop(live);
         fs::create_dir_all(directory)?;
@@ -410,17 +417,50 @@ struct RecordingRequest {
     force_software: bool,
 }
 
-fn record_frames(
+fn record(
     request: RecordingRequest,
     stop: &AtomicBool,
     data: &Mutex<Buffer>,
     clock: &audio::Clock,
     ready: mpsc::SyncSender<(VideoConfig, bool)>,
 ) -> Result<()> {
+    // Una espera breve del historial no debe consumir el tiempo del siguiente fotograma.
+    thread::scope(|scope| {
+        let (tx, rx) = mpsc::sync_channel::<(EncodedSample, Option<ParameterSets>)>(8);
+        let retain = request.retain;
+        let history = thread::Builder::new()
+            .name("cut-replay-history".into())
+            .spawn_scoped(scope, move || -> std::io::Result<()> {
+                let mut writer = storage::Writer::default();
+                for (packet, parameters) in rx {
+                    let frame = writer.append(packet)?;
+                    let mut history = data.lock().unwrap();
+                    if let Some(parameters) = parameters {
+                        history.parameters = parameters;
+                    }
+                    history.push(frame, retain);
+                }
+                Ok(())
+            })?;
+        let result = record_frames(request, stop, tx, clock, ready);
+        history
+            .join()
+            .map_err(|_| "Se interrumpió el historial de video.")??;
+        result
+    })
+}
+
+fn record_frames(
+    request: RecordingRequest,
+    stop: &AtomicBool,
+    tx: mpsc::SyncSender<(EncodedSample, Option<ParameterSets>)>,
+    clock: &audio::Clock,
+    ready: mpsc::SyncSender<(VideoConfig, bool)>,
+) -> Result<()> {
     let RecordingRequest {
         target,
         config,
-        retain,
+        retain: _,
         include_cursor,
         force_software,
     } = request;
@@ -455,7 +495,6 @@ fn record_frames(
     ready
         .send((config, software))
         .map_err(|_| "Se canceló el inicio de la captura.")?;
-    let mut writer = storage::Writer::default();
     let mut packets = Vec::new();
     let interval = Duration::from_nanos(1_000_000_000 / u64::from(config.fps));
     let mut next = Duration::ZERO;
@@ -474,12 +513,8 @@ fn record_frames(
             .map_err(|error| format!("Salida del codificador H.264: {error}"))?;
         for packet in packets.drain(..) {
             let parameters = packet.is_keyframe.then(|| encoder.parameters.clone());
-            let frame = writer.append(packet)?;
-            let mut history = data.lock().unwrap();
-            if let Some(parameters) = parameters {
-                history.parameters = parameters;
-            }
-            history.push(frame, retain);
+            tx.send((packet, parameters))
+                .map_err(|_| "Se cerró el historial de video.")?;
             has_output = true;
         }
         if !has_output && initial.elapsed() > Duration::from_secs(8) {
@@ -630,7 +665,13 @@ mod tests {
             (mp4::Audio::Mixed(Some(track("Mezcla"))), 1),
             (mp4::Audio::Mixed(None), 1),
             (
-                mp4::Audio::Separate(vec![track("Mezcla"), track("Discord")]),
+                mp4::Audio::Separate(
+                    [
+                        ("mix".into(), track("Mezcla")),
+                        ("app:discord".into(), track("Discord")),
+                    ]
+                    .into(),
+                ),
                 2,
             ),
         ];
