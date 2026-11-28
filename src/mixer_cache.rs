@@ -5,7 +5,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::audio::Settings;
+use crate::audio::{OUTPUT_AUDIO_PREFIX, Settings};
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
@@ -29,10 +29,12 @@ impl MixerCache {
 
     pub fn load(path: &Path) -> Option<Self> {
         let mut cache: Self = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
-        cache
-            .settings
-            .tracks
-            .retain(|id, _| id == "mic" || id == "system" || id.starts_with("app:"));
+        cache.settings.tracks.retain(|id, _| {
+            id == "mic"
+                || id == "system"
+                || id.starts_with("app:")
+                || id.starts_with(OUTPUT_AUDIO_PREFIX)
+        });
         Some(cache)
     }
 

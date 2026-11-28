@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
         mpsc::{Receiver, RecvTimeoutError},
     },
@@ -26,13 +26,59 @@ use windows::Win32::{
     },
 };
 
-use crate::compat::{AudioMode, Capabilities};
 use crate::replay::Result;
 use crate::{microphone::Microphone, mix::Mix};
 
+#[path = "process_loopback.rs"]
+mod process_loopback;
+
 const RATE: u32 = 48_000;
 const SYSTEM_AUDIO_ID: &str = "system";
-const SYSTEM_AUDIO_NOTICE: &str = "Este Windows usa audio del sistema: graba todas las aplicaciones del dispositivo de salida predeterminado. No permite separarlas ni excluirlas individualmente.";
+pub const OUTPUT_AUDIO_PREFIX: &str = "output:";
+const SYSTEM_AUDIO_NOTICE: &str = "No se pudo iniciar el audio por aplicación. Audio del sistema graba todas las aplicaciones de la salida predeterminada en una pista, separada del micrófono.";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AudioMode {
+    Applications,
+    System,
+}
+
+fn audio_mode() -> AudioMode {
+    static PROBE: OnceLock<()> = OnceLock::new();
+    static APPLICATIONS: AtomicBool = AtomicBool::new(false);
+    PROBE.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = thread::Builder::new()
+            .name("cut-audio-probe".into())
+            .spawn(move || {
+                let Ok(_apartment) = crate::com::Mta::enter() else {
+                    return;
+                };
+                for delay in [0, 5, 15] {
+                    thread::sleep(Duration::from_secs(delay));
+                    let supported =
+                        Input::new(InputKind::Application(std::process::id()), "", false).is_ok();
+                    if supported {
+                        APPLICATIONS.store(true, Ordering::Release);
+                    }
+                    if delay == 0 {
+                        let _ = tx.send(());
+                    }
+                    if supported {
+                        break;
+                    }
+                }
+            });
+        if worker.is_ok() {
+            let _ = rx.recv_timeout(Duration::from_secs(2));
+        }
+    });
+    if APPLICATIONS.load(Ordering::Acquire) {
+        AudioMode::Applications
+    } else {
+        AudioMode::System
+    }
+}
 
 pub type SharedSettings = Arc<Mutex<Arc<Settings>>>;
 
@@ -73,11 +119,12 @@ impl Settings {
         self.tracks.get(id).copied().unwrap_or(Gain {
             // El loopback del sistema no puede respetar exclusiones por aplicación.
             // Exige elegir esta pista antes de volver a incluir esas aplicaciones.
-            include: id != SYSTEM_AUDIO_ID
-                || !self
-                    .tracks
-                    .iter()
-                    .any(|(id, gain)| id.starts_with("app:") && !gain.include),
+            include: !id.starts_with(OUTPUT_AUDIO_PREFIX)
+                && (id != SYSTEM_AUDIO_ID
+                    || !self
+                        .tracks
+                        .iter()
+                        .any(|(id, gain)| id.starts_with("app:") && !gain.include)),
             volume: 100,
         })
     }
@@ -202,17 +249,56 @@ fn active_applications(enumerator: &DeviceEnumerator, settings: &Settings) -> Ca
     }
 }
 
-fn capture_sources(mode: AudioMode, applications: Vec<Application>) -> Vec<Application> {
+fn output_sources(enumerator: &DeviceEnumerator) -> Vec<Source> {
+    let Ok(outputs) = enumerator.get_device_collection(Direction::Render) else {
+        return Vec::new();
+    };
+    let mut sources: Vec<_> = (&outputs)
+        .into_iter()
+        .flatten()
+        .filter_map(|device| {
+            let id = device.get_id().ok()?;
+            let label = device.get_friendlyname().ok()?;
+            Some(Source {
+                id: format!("{OUTPUT_AUDIO_PREFIX}{id}"),
+                label,
+            })
+        })
+        .collect();
+    sources.sort_by(|a, b| a.label.cmp(&b.label).then_with(|| a.id.cmp(&b.id)));
+    sources
+}
+
+fn capture_sources(
+    mode: AudioMode,
+    applications: Vec<Application>,
+    outputs: Vec<Source>,
+) -> Vec<Application> {
     match mode {
         AudioMode::Applications => applications,
-        AudioMode::System => vec![Application {
-            source: Source {
-                id: SYSTEM_AUDIO_ID.into(),
-                label: "Audio del sistema".into(),
-            },
+        AudioMode::System => std::iter::once(Source {
+            id: SYSTEM_AUDIO_ID.into(),
+            label: "Audio del sistema".into(),
+        })
+        .chain(outputs)
+        .map(|source| Application {
+            source,
             pids: vec![0],
-        }],
+        })
+        .collect(),
     }
+}
+
+fn default_output_covered(
+    default: Option<&str>,
+    sources: &[Application],
+    settings: &Settings,
+) -> bool {
+    sources.iter().any(|app| {
+        let id = &app.source.id;
+        id.strip_prefix(OUTPUT_AUDIO_PREFIX)
+            .is_some_and(|device| Some(device) == default && settings.gain(id).include)
+    })
 }
 
 fn application_for(
@@ -392,16 +478,18 @@ pub fn monitor_mixer(
     mut audible_changed: impl FnMut(Vec<Source>),
 ) -> Result<()> {
     let _apartment = crate::com::Mta::enter()?;
-    let audio_mode = Capabilities::current()?.audio_mode();
+    let mut mode = audio_mode();
     let enumerator = DeviceEnumerator::new()?;
     let mut devices = None;
     let mut sessions = Vec::<RenderMeter>::new();
+    let mut outputs = Vec::new();
     let mut tracks = AudibleTracks::default();
     let mut previous = None;
     let mut refresh_at = Instant::now();
     loop {
         let now = Instant::now();
         if now >= refresh_at {
+            mode = audio_mode();
             refresh_at = now + Duration::from_secs(2);
             let catalog = capture_devices(&enumerator);
             if devices.as_ref() != Some(&catalog) {
@@ -409,7 +497,7 @@ pub fn monitor_mixer(
                 devices = Some(catalog);
             }
             sessions.clear();
-            if audio_mode == AudioMode::Applications {
+            if mode == AudioMode::Applications {
                 let processes = processes();
                 render_sessions(&enumerator, |control| {
                     if let Ok(pid) = control.get_process_id()
@@ -425,6 +513,11 @@ pub fn monitor_mixer(
                         });
                     }
                 });
+            } else {
+                outputs = capture_sources(mode, Vec::new(), output_sources(&enumerator))
+                    .into_iter()
+                    .map(|app| app.source)
+                    .collect();
             }
         }
         let active = sessions
@@ -437,13 +530,10 @@ pub fn monitor_mixer(
                     .is_ok_and(|peak| peak >= 0.001);
                 (&session.source, audible)
             });
-        let audible = if audio_mode == AudioMode::System {
+        let audible = if mode == AudioMode::System {
             // Keep the fallback visible before sound starts, so it can be
             // disabled before it records any application's output.
-            capture_sources(audio_mode, Vec::new())
-                .into_iter()
-                .map(|app| app.source)
-                .collect()
+            outputs.clone()
         } else {
             tracks.update(now, active)
         };
@@ -523,6 +613,26 @@ struct Input {
     microphone: Option<Box<Microphone>>,
     staging: Vec<u8>,
     pcm: Vec<u8>,
+    next_packet_at: Option<Duration>,
+}
+
+fn packet_start(
+    next: &mut Option<Duration>,
+    observed: Duration,
+    duration: Duration,
+    valid_timestamp: bool,
+    discontinuity: bool,
+) -> Duration {
+    let tolerance = if valid_timestamp {
+        Duration::from_micros(250)
+    } else {
+        Duration::from_millis(200)
+    };
+    let start = next
+        .filter(|end| !discontinuity && end.abs_diff(observed) <= tolerance)
+        .unwrap_or(observed);
+    *next = Some(start + duration);
+    start
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -534,21 +644,30 @@ enum InputKind {
 
 impl Input {
     fn new(kind: InputKind, device: &str, mono: bool) -> Result<Self> {
-        let is_microphone = kind == InputKind::Microphone;
-        let mut client = match kind {
-            InputKind::Application(pid) => AudioClient::new_application_loopback_client(pid, true)?,
+        let client = match kind {
+            InputKind::Application(pid) => {
+                process_loopback::Activation::start(pid)?.wait_for_probe()?
+            }
             InputKind::Microphone | InputKind::System => {
                 let enumerator = DeviceEnumerator::new()?;
-                let source = if kind == InputKind::System {
-                    enumerator.get_default_device(Direction::Render)?
-                } else if device.is_empty() {
-                    enumerator.get_default_device(Direction::Capture)?
+                let source = if device.is_empty() {
+                    let direction = if kind == InputKind::System {
+                        Direction::Render
+                    } else {
+                        Direction::Capture
+                    };
+                    enumerator.get_default_device(direction)?
                 } else {
                     enumerator.get_device(device)?
                 };
                 source.get_iaudioclient()?
             }
         };
+        Self::start(client, kind, mono)
+    }
+
+    fn start(mut client: AudioClient, kind: InputKind, mono: bool) -> Result<Self> {
+        let is_microphone = kind == InputKind::Microphone;
         let input_channels = if is_microphone
             && client
                 .get_mixformat()
@@ -602,6 +721,7 @@ impl Input {
             microphone: is_microphone.then(|| Box::new(Microphone::new(channels))),
             staging: Vec::new(),
             pcm: Vec::new(),
+            next_packet_at: None,
         })
     }
 
@@ -610,6 +730,17 @@ impl Input {
         clock: &Clock,
         gain: u16,
         suppress: bool,
+        output: impl FnMut(Duration, &[u8], u16),
+    ) -> Result<()> {
+        self.read_processed(clock, gain, suppress, true, output)
+    }
+
+    fn read_processed(
+        &mut self,
+        clock: &Clock,
+        gain: u16,
+        suppress: bool,
+        gate: bool,
         mut output: impl FnMut(Duration, &[u8], u16),
     ) -> Result<()> {
         while let Some(size) = self.capture.get_next_packet_size()? {
@@ -629,16 +760,23 @@ impl Input {
                     **mic = Microphone::new(self.channels);
                 }
             }
-            let packet_time = if info.flags.timestamp_error || info.timestamp == 0 {
-                clock
-                    .now()?
-                    .saturating_sub(Duration::from_secs_f64(f64::from(frames) / f64::from(RATE)))
-            } else {
+            let packet_duration = Duration::from_secs_f64(f64::from(frames) / f64::from(RATE));
+            let valid_timestamp = !info.flags.timestamp_error && info.timestamp != 0;
+            let observed = if valid_timestamp {
                 clock.relative(info.timestamp)
+            } else {
+                clock.now()?.saturating_sub(packet_duration)
             };
+            let packet_time = packet_start(
+                &mut self.next_packet_at,
+                observed,
+                packet_duration,
+                valid_timestamp,
+                info.flags.data_discontinuity,
+            );
             self.pcm.clear();
             // Keep closed-gate voice out of the noise suppressor's delayed samples too.
-            if self.microphone.is_some() && !crate::hotkey::talk_open() {
+            if gate && self.microphone.is_some() && !crate::hotkey::talk_open() {
                 self.staging[..frames as usize * input_width].fill(0);
             }
             let input = &self.staging[..frames as usize * input_width];
@@ -667,12 +805,40 @@ impl Input {
                 }
                 packet_time
             };
-            if self.microphone.is_some() && !crate::hotkey::talk_open() {
+            if gate && self.microphone.is_some() && !crate::hotkey::talk_open() {
                 self.pcm.fill(0);
             }
             output(start, &self.pcm, self.channels);
         }
         Ok(())
+    }
+}
+
+/// Flujo independiente para escucharse, sin cambiar la activación de la grabación.
+pub(crate) struct PreviewInput(Input);
+
+impl PreviewInput {
+    pub(crate) fn new(settings: &Settings) -> Result<Self> {
+        Ok(Self(Input::new(
+            InputKind::Microphone,
+            &settings.device,
+            settings.mono,
+        )?))
+    }
+
+    pub(crate) fn read(
+        &mut self,
+        clock: &Clock,
+        settings: &Settings,
+        output: impl FnMut(Duration, &[u8], u16),
+    ) -> Result<()> {
+        self.0.read_processed(
+            clock,
+            settings.gain("mic").volume,
+            settings.noise_suppression,
+            false,
+            output,
+        )
     }
 }
 
@@ -709,8 +875,9 @@ pub fn run(
     notices: &Notices,
 ) -> Result<()> {
     let _apartment = crate::com::Mta::enter()?;
-    let audio_mode = Capabilities::current()?.audio_mode();
+    let mut mode = audio_mode();
     let mut groups = HashMap::<String, Group>::new();
+    let mut pending = HashMap::<u32, process_loopback::Activation>::new();
     let mut sources = Vec::new();
     let mut discover_at = Instant::now();
     let mut previous = Arc::new(Settings::default());
@@ -736,7 +903,20 @@ pub fn run(
         if discovery {
             discover_at = Instant::now() + Duration::from_secs(2);
             if let Ok(enumerator) = DeviceEnumerator::new() {
-                let applications = if audio_mode == AudioMode::Applications {
+                let detected = audio_mode();
+                if detected != mode {
+                    // Cierra el loopback anterior antes de abrir el de las aplicaciones.
+                    let cutover = clock.now()?;
+                    for (id, mut group) in groups.extract_if(|id, _| id != "mic") {
+                        group.mix.finish(cutover, &mut group.output)?;
+                        if let Some(track) = history.lock().unwrap().get_mut(&id) {
+                            track.packets.append(&mut group.output.packets);
+                        }
+                    }
+                    notices.lock().unwrap().retain(|id, _| id == "mic");
+                    mode = detected;
+                }
+                sources = if mode == AudioMode::Applications {
                     let plan = active_applications(&enumerator, &preferences);
                     for (id, roots) in &plan.blocked {
                         if roots.iter().any(|pid| {
@@ -765,9 +945,8 @@ pub fn run(
                         groups.remove(SYSTEM_AUDIO_ID);
                         output_device = current_output;
                     }
-                    Vec::new()
+                    capture_sources(mode, Vec::new(), output_sources(&enumerator))
                 };
-                sources = capture_sources(audio_mode, applications);
             }
             if !sources
                 .iter()
@@ -782,19 +961,29 @@ pub fn run(
                 });
             }
         }
+        let default_covered = mode == AudioMode::System
+            && default_output_covered(output_device.as_deref(), &sources, &preferences);
         let reconcile = discovery || !Arc::ptr_eq(&preferences, &previous);
         if reconcile {
+            pending.retain(|pid, _| {
+                sources
+                    .iter()
+                    .any(|app| app.pids.contains(pid) && preferences.gain(&app.source.id).include)
+            });
             groups.retain(|id, _| {
                 sources
                     .iter()
                     .any(|app| &app.source.id == id && !app.pids.is_empty())
                     && preferences.gain(id).include
+                    && !(id == SYSTEM_AUDIO_ID && default_covered)
                     && !newly_blocked.contains(id)
             });
             let cutoff = clock.now()?.saturating_sub(retain + Duration::from_secs(3));
             let mut all = history.lock().unwrap();
             all.retain(|id, track| {
-                if id != "mix" && !sources.iter().any(|app| &app.source.id == id) {
+                if (id == SYSTEM_AUDIO_ID && default_covered)
+                    || (id != "mix" && !sources.iter().any(|app| &app.source.id == id))
+                {
                     track.level = 0.0;
                 }
                 while track
@@ -823,6 +1012,16 @@ pub fn run(
             let Source { id, label } = &app.source;
             let gain = preferences.gain(id);
             let is_system = id == SYSTEM_AUDIO_ID;
+            if is_system && default_covered {
+                if reconcile {
+                    notices.lock().unwrap().insert(
+                        id.clone(),
+                        "La salida predeterminada está seleccionada como pista independiente."
+                            .into(),
+                    );
+                }
+                continue;
+            }
             if !gain.include {
                 if reconcile {
                     if is_system {
@@ -841,43 +1040,84 @@ pub fn run(
                 continue;
             }
             let is_mic = id == "mic";
-            if discovery
+            let update_inputs = discovery
                 || !previous.gain(id).include
                 || (is_mic
-                    && (preferences.device != previous.device || preferences.mono != previous.mono))
-            {
-                if let Some(group) = groups.get_mut(id) {
-                    group.inputs.retain(|pid, _| app.pids.contains(pid));
+                    && (preferences.device != previous.device
+                        || preferences.mono != previous.mono));
+            if update_inputs && let Some(group) = groups.get_mut(id) {
+                group.inputs.retain(|pid, _| app.pids.contains(pid));
+            }
+            let mut last_error = None;
+            let mut opened = false;
+            for &pid in &app.pids {
+                if groups
+                    .get(id)
+                    .is_some_and(|group| group.inputs.contains_key(&pid))
+                {
+                    continue;
                 }
-                let mut last_error = None;
-                for &pid in &app.pids {
-                    if groups
-                        .get(id)
-                        .is_some_and(|group| group.inputs.contains_key(&pid))
-                    {
-                        continue;
-                    }
-                    let kind = if is_mic {
-                        InputKind::Microphone
-                    } else if is_system {
-                        InputKind::System
-                    } else {
-                        InputKind::Application(pid)
-                    };
-                    let input =
-                        match Input::new(kind, &preferences.device, is_mic && preferences.mono) {
-                            Ok(input) => input,
-                            Err(error) => {
-                                last_error = Some(error.to_string());
+                let input = if pid != 0 {
+                    if let Some(activation) = pending.get_mut(&pid) {
+                        let client = match activation.poll() {
+                            process_loopback::ActivationStatus::Pending => continue,
+                            process_loopback::ActivationStatus::Delayed => {
+                                last_error = Some(
+                                    "Windows todavía está preparando la captura de esta aplicación."
+                                        .into(),
+                                );
                                 continue;
                             }
+                            process_loopback::ActivationStatus::Complete(client) => client,
                         };
-                    if let Some(group) = groups.get_mut(id) {
-                        group.inputs.insert(pid, input);
+                        pending.remove(&pid);
+                        client.and_then(|client| {
+                            Input::start(client, InputKind::Application(pid), false)
+                        })
                     } else {
-                        groups.insert(id.clone(), Group::new(label, pid, input)?);
+                        if update_inputs {
+                            match process_loopback::Activation::start(pid) {
+                                Ok(activation) => {
+                                    pending.insert(pid, activation);
+                                }
+                                Err(error) => last_error = Some(error.to_string()),
+                            }
+                        }
+                        continue;
                     }
+                } else if update_inputs {
+                    let (kind, device) = if is_mic {
+                        (InputKind::Microphone, preferences.device.as_str())
+                    } else if is_system {
+                        (
+                            InputKind::System,
+                            output_device.as_deref().unwrap_or_default(),
+                        )
+                    } else {
+                        (
+                            InputKind::System,
+                            id.strip_prefix(OUTPUT_AUDIO_PREFIX).unwrap_or_default(),
+                        )
+                    };
+                    Input::new(kind, device, is_mic && preferences.mono)
+                } else {
+                    continue;
+                };
+                let input = match input {
+                    Ok(input) => input,
+                    Err(error) => {
+                        last_error = Some(error.to_string());
+                        continue;
+                    }
+                };
+                opened = true;
+                if let Some(group) = groups.get_mut(id) {
+                    group.inputs.insert(pid, input);
+                } else {
+                    groups.insert(id.clone(), Group::new(label, pid, input)?);
                 }
+            }
+            if update_inputs || opened || last_error.is_some() {
                 let mut current = notices.lock().unwrap();
                 if groups.get(id).is_some_and(|group| !group.inputs.is_empty()) {
                     if is_system {
@@ -973,12 +1213,15 @@ mod tests {
             },
             pids: vec![42],
         }];
-        let sources = capture_sources(AudioMode::System, applications);
+        let sources = capture_sources(AudioMode::System, applications, Vec::new());
         let ids: Vec<_> = sources.iter().map(|app| app.source.id.as_str()).collect();
         assert_eq!(ids, vec!["system"]);
         assert_eq!(sources[0].source.label, "Audio del sistema");
         assert_eq!(sources[0].pids, vec![0]);
-        assert_eq!(capture_sources(AudioMode::System, Vec::new()).len(), 1);
+        assert_eq!(
+            capture_sources(AudioMode::System, Vec::new(), Vec::new()).len(),
+            1
+        );
     }
 
     #[test]
@@ -990,7 +1233,7 @@ mod tests {
             },
             pids: vec![42],
         }];
-        let sources = capture_sources(AudioMode::Applications, applications);
+        let sources = capture_sources(AudioMode::Applications, applications, Vec::new());
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].source.id, "app:game");
         assert_eq!(sources[0].pids, vec![42]);
@@ -1094,7 +1337,7 @@ mod tests {
             },
             pids: vec![10],
         }];
-        let sources = capture_sources(AudioMode::System, applications);
+        let sources = capture_sources(AudioMode::System, applications, Vec::new());
         let output = render_capture_plan(&sources, &Settings::default())?;
         assert_eq!(output.level, 4000.0 / 32768.0);
         assert!(!output.packets.is_empty());

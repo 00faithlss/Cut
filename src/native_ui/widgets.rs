@@ -270,7 +270,14 @@ pub fn keycap(th: &Theme, text: impl Into<SharedString>, kind: Cap, enabled: boo
         .font_weight(FontWeight::SEMIBOLD)
         .text_size(px(13.))
         .opacity(if enabled { 1. } else { 0.4 })
-        .child(text.into())
+        .child(
+            div()
+                .min_w(px(0.))
+                .w_full()
+                .whitespace_normal()
+                .text_center()
+                .child(text.into()),
+        )
         .child(key_lip(border))
 }
 

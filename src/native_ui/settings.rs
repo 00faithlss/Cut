@@ -96,11 +96,11 @@ impl Studio {
                 .map_or("Sin tecla".into(), |b| b.label().into())
         };
         let hint: SharedString = if capturing.is_some() {
-            "Pulsa una tecla o combinación. Esc cancela.".into()
+            "Mantén las teclas o botones juntos y suelta para asignar. Esc cancela.".into()
         } else if !self.flash.is_empty() {
             self.flash.clone()
         } else {
-            "Haz clic en una tecla para cambiarla.".into()
+            "Haz clic en un atajo para cambiarlo.".into()
         };
         let hint_color = if capturing.is_some() {
             th.accent_text
@@ -132,7 +132,7 @@ impl Studio {
                             .flex_col()
                             .gap(px(4.))
                             .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child("Guardar clip"))
-                            .child(div().text_size(px(12.)).text_color(th.muted).child("Guarda el replay al instante.")),
+                            .child(div().text_size(px(12.)).text_color(th.muted).child("Guarda el replay con una tecla, combinación o botón del mouse.")),
                     )
                     .child(
                         div()
@@ -165,7 +165,7 @@ impl Studio {
                                     .text_size(px(12.))
                                     .line_height(relative(1.4))
                                     .text_color(th.muted)
-                                    .child("Tu micrófono solo entra al clip mientras mantienes la tecla. Sirve cualquier tecla, también Alt, Ctrl o el teclado numérico."),
+                                    .child("Tu voz entra al clip mientras mantienes las teclas o botones asignados. Combina teclado y mouse; Esc cancela la asignación."),
                             ),
                     )
                     .child(switch(th, "talk-switch", ptt.is_some()).on_click(cx.listener(|this, _, _, cx| {
@@ -181,7 +181,7 @@ impl Studio {
                                 talk_label,
                                 if capturing == Some(true) { Cap::Active } else { Cap::Talk },
                                 ptt.is_some() || capturing == Some(true),
-                            ))
+                            ).max_w(px(280.)).h_auto().min_h(px(44.)).py(px(10.)))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 if this.state.settings.push_to_talk.is_some() {
                                     this.begin_edit(true);
@@ -425,6 +425,79 @@ impl Studio {
                         ),
                     ),
             )
+            .child(self.microphone_preview(th, cx))
+    }
+
+    fn microphone_preview(&self, th: &Theme, cx: &mut Context<Self>) -> Div {
+        let testing = self.state.mic_preview;
+        let ready = self.state.mic_preview_ready;
+        let level = self.state.mic_preview_level.clamp(0., 1.);
+        let lit = (level.sqrt() * 32.).ceil() as usize;
+        div()
+            .mt(px(24.))
+            .pt(px(20.))
+            .border_t_1()
+            .border_color(th.line)
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(16.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(180.))
+                            .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child("Prueba de sonido"))
+                            .child(
+                                div()
+                                    .mt(px(4.))
+                                    .text_size(px(12.))
+                                    .text_color(th.muted)
+                                    .child(if testing && !ready {
+                                        "Abriendo el micrófono y la salida de sonido…"
+                                    } else if testing {
+                                        "Estás escuchando tu voz. Ajusta el volumen, mono y supresión en vivo."
+                                    } else {
+                                        "Escucha tu voz con los ajustes actuales, incluso con la captura en pausa."
+                                    }),
+                            ),
+                    )
+                    .child(
+                        ghost(th, "mic-listen")
+                            .h(px(38.))
+                            .px(px(14.))
+                            .child(icon(if testing { "square" } else { "play" }, 15., th.text))
+                            .child(if testing && !ready {
+                                "Cancelar prueba"
+                            } else if testing {
+                                "Detener prueba"
+                            } else {
+                                "Escucharme"
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.controller.send(C::MicPreview(!this.state.mic_preview));
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .when(testing && ready, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(3.))
+                        .h(px(16.))
+                        .mt(px(16.))
+                        .children((0..32).map(|i| {
+                            div()
+                                .flex_1()
+                                .h(px(8.))
+                                .rounded(px(2.))
+                                .bg(if i < lit { th.meter_hi } else { th.tile_off })
+                        })),
+                )
+            })
     }
 
     fn behavior_card(&mut self, th: &Theme, cx: &mut Context<Self>) -> Div {

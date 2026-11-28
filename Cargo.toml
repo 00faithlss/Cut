@@ -1,6 +1,6 @@
 [package]
 name = "cut"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 default-run = "Cut"
 autobins = false
@@ -38,6 +38,7 @@ win-native-media = "0.1.1"
 winreg = "0.55"
 windows = { version = "0.62", features = ["Security_Authorization_AppCapabilityAccess", "Win32_Graphics_Direct3D_Fxc", "Win32_Media_Audio", "Win32_Storage_FileSystem", "Win32_System_SystemInformation", "Win32_System_Com", "Win32_System_LibraryLoader", "Win32_UI_Shell", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Performance", "Win32_System_Variant", "Win32_System_WinRT_Graphics_Capture", "Win32_System_Threading", "Win32_Security"] }
 wasapi = "0.27"
+windows-core = "0.62"
 tray-icon = { version = "0.26", default-features = false }
 png = "0.18"
 mp4 = "0.14"

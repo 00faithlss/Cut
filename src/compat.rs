@@ -2,12 +2,6 @@
 //! separate from device support: a supported API can still be denied or absent
 //! on a particular GPU/session.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AudioMode {
-    Applications,
-    System,
-}
-
 #[derive(Clone, Copy, Debug)]
 pub struct Capabilities {
     pub build: u32,
@@ -57,17 +51,6 @@ impl Capabilities {
         })
     }
 
-    pub fn audio_mode(self) -> AudioMode {
-        // AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK starts at build 20348.
-        // Windows 10 client builds (including LTSC 2019/2021) use endpoint
-        // loopback; Windows 11 can keep individual application tracks.
-        if self.build >= 20348 {
-            AudioMode::Applications
-        } else {
-            AudioMode::System
-        }
-    }
-
     pub fn check_window_capture(self, _include_cursor: bool) -> Result<(), &'static str> {
         if self.build < 18362 {
             return Err(
@@ -89,24 +72,6 @@ impl Capabilities {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn windows_10_uses_system_audio_instead_of_unsupported_process_loopback() {
-        for build in [10240, 14393, 17763, 18362, 19041, 19044, 19045, 20347] {
-            assert_eq!(
-                Capabilities { build }.audio_mode(),
-                AudioMode::System,
-                "{build}"
-            );
-        }
-        for build in [20348, 22000, 22621, 26100] {
-            assert_eq!(
-                Capabilities { build }.audio_mode(),
-                AudioMode::Applications,
-                "{build}"
-            );
-        }
-    }
 
     #[test]
     fn ltsc_2019_window_capture_has_actionable_monitor_fallback() {

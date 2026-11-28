@@ -12,6 +12,7 @@ const FRAMES: usize = 1024;
 const DELAY_FRAMES: u64 = RATE / 16;
 const MIX_DELAY_FRAMES: u64 = RATE / 5;
 const FRAME_NS: u128 = 1_000_000_000;
+const PCM_CEILING: f32 = 23_197.0; // -3 dBFS antes de la codificación AAC.
 
 pub struct Mix {
     channels: u16,
@@ -21,10 +22,24 @@ pub struct Mix {
     rendered_until: u64,
     encoded: Vec<EncodedAudio>,
     delay_frames: u64,
+    limiter_gain: f32,
 }
 
 fn samples_at(time: Duration) -> u64 {
-    (time.as_nanos() * u128::from(RATE) / FRAME_NS) as u64
+    ((time.as_nanos() * u128::from(RATE) + FRAME_NS / 2) / FRAME_NS) as u64
+}
+
+fn peak_gain(block: &[i32]) -> f32 {
+    let peak = block
+        .iter()
+        .map(|sample| sample.unsigned_abs())
+        .max()
+        .unwrap_or(0);
+    PCM_CEILING / (peak as f32).max(PCM_CEILING)
+}
+
+fn block_time(index: u64) -> Duration {
+    Duration::from_nanos((u128::from(index) * FRAMES as u128 * FRAME_NS / u128::from(RATE)) as u64)
 }
 
 impl Mix {
@@ -41,6 +56,7 @@ impl Mix {
             rendered_until: 0,
             encoded: Vec::new(),
             delay_frames: DELAY_FRAMES,
+            limiter_gain: 1.0,
         })
     }
 
@@ -95,6 +111,21 @@ impl Mix {
 
     pub fn render(&mut self, time: Duration, history: &mut History) -> Result<()> {
         let ready = samples_at(time).saturating_sub(self.delay_frames) / FRAMES as u64;
+        self.render_before(ready, history)
+    }
+
+    pub fn finish(mut self, time: Duration, history: &mut History) -> Result<()> {
+        let ready = samples_at(time) / FRAMES as u64;
+        self.render_before(ready, history)?;
+        self.encoder.drain(&mut self.encoded)?;
+        history.packets.extend(self.encoded.drain(..).map(Arc::new));
+        // Media Foundation redondea las marcas de tiempo a 100 ns.
+        let boundary = block_time(ready).saturating_sub(Duration::from_nanos(100));
+        history.packets.retain(|packet| packet.timestamp < boundary);
+        Ok(())
+    }
+
+    fn render_before(&mut self, ready: u64, history: &mut History) -> Result<()> {
         let mut peak = 0;
         let samples = FRAMES * usize::from(self.channels);
         while self
@@ -103,20 +134,36 @@ impl Mix {
             .is_some_and(|(&index, _)| index < ready)
         {
             let (index, mut block) = self.pending.pop_first().unwrap();
+            let limit = peak_gain(&block[..samples]);
+            let next_limit = self
+                .pending
+                .get(&(index + 1))
+                .map_or(1.0, |next| peak_gain(&next[..samples]));
+            // Anticipa el siguiente bloque y recupera el volumen gradualmente.
+            let start_gain = self.limiter_gain.min(limit);
+            let end_gain = (start_gain + 0.12).min(limit).min(next_limit);
+            let gain_step = (end_gain - start_gain) / (FRAMES - 1) as f32;
+            self.limiter_gain = end_gain;
             self.rendered_until = index + 1;
             let mut pcm = [0; FRAMES * 4];
-            for (i, sample) in block[..samples].iter().enumerate() {
-                let value = (*sample).clamp(i32::from(i16::MIN), i32::from(i16::MAX));
-                peak = peak.max(value.unsigned_abs());
-                pcm[i * 2..i * 2 + 2].copy_from_slice(&(value as i16).to_le_bytes());
+            let channels = usize::from(self.channels);
+            for (frame, (input, output)) in block[..samples]
+                .chunks_exact(channels)
+                .zip(pcm.chunks_exact_mut(channels * 2))
+                .enumerate()
+            {
+                let gain = start_gain + gain_step * frame as f32;
+                for (sample, bytes) in input.iter().zip(output.as_chunks_mut::<2>().0) {
+                    let value = (*sample as f32 * gain).round() as i16;
+                    peak = peak.max(u32::from(value.unsigned_abs()));
+                    bytes.copy_from_slice(&value.to_le_bytes());
+                }
             }
             if self.spare.is_none() {
                 block[..samples].fill(0);
                 self.spare = Some(block);
             }
-            let timestamp = Duration::from_nanos(
-                (u128::from(index) * FRAMES as u128 * FRAME_NS / u128::from(RATE)) as u64,
-            );
+            let timestamp = block_time(index);
             self.encoder
                 .encode(&pcm[..samples * 2], timestamp, &mut self.encoded)?;
             history.packets.extend(self.encoded.drain(..).map(Arc::new));

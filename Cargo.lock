@@ -1152,7 +1152,7 @@ checksum = "e2931af7e13dc045d8e9d26afccc6fa115d64e115c9c84b1166288b46f6782c2"
 
 [[package]]
 name = "cut"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "embed-resource",
  "gpui",
@@ -1169,6 +1169,7 @@ dependencies = [
  "win-native-media",
  "windows 0.62.2",
  "windows-capture",
+ "windows-core 0.62.2",
  "winreg 0.55.0",
  "wry",
 ]

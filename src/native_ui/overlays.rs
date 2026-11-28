@@ -11,16 +11,51 @@ use std::time::Duration;
 
 const RELEASES: &str = "https://github.com/00faithlss/Cut/releases";
 
-const ITEMS: [(&str, &str, &str); 2] = [
+const ITEMS: [(&str, &str, &str); 9] = [
     (
-        "film",
-        "Clips más fluidos",
-        "Mejora la captura a 120 FPS cuando el juego mantiene la GPU ocupada.",
+        "wave",
+        "Audio con menos distorsión",
+        "Atenúa los picos de la mezcla y reduce cortes al grabar.",
     ),
     (
-        "refresh",
-        "Actualización a un clic del aviso",
-        "Pulsa la notificación para ir a la descarga y ver su progreso; al terminar, Cut instala la actualización y vuelve a abrirse.",
+        "sliders",
+        "Pistas por aplicación",
+        "Cut comprueba si tu equipo puede separar el audio de las aplicaciones, también en Windows 10 y LTSC.",
+    ),
+    (
+        "sliders",
+        "Recuperación de pistas",
+        "Si la captura por aplicación tarda en iniciar, Cut vuelve a intentarlo durante la grabación.",
+    ),
+    (
+        "sliders",
+        "Pistas por salida de audio",
+        "Si la captura por aplicación no está disponible, puedes grabar en pistas distintas las salidas que selecciones en el mezclador.",
+    ),
+    (
+        "film",
+        "Captura más estable",
+        "Reduce los tirones cuando el historial del replay está ocupado.",
+    ),
+    (
+        "film",
+        "Captura con menos carga",
+        "Reduce el trabajo de la GPU cuando el cursor está oculto durante la captura de pantalla completa.",
+    ),
+    (
+        "cursor",
+        "Mouse en ambos atajos",
+        "Puedes asignar clic izquierdo, derecho, central o botones laterales tanto a Guardar clip como a Pulsar para Hablar.",
+    ),
+    (
+        "key",
+        "Combinaciones en ambos atajos",
+        "Combina teclas y botones del mouse para guardar clips o hablar, y pulsa Esc para cancelar la asignación.",
+    ),
+    (
+        "mic",
+        "Escucha tu micrófono",
+        "Prueba tu voz desde Ajustes y escucha los cambios de volumen, mono y supresión de ruido, incluso con la captura en pausa.",
     ),
 ];
 

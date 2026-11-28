@@ -117,6 +117,9 @@ impl Studio {
 
     fn set_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
         if self.tab != tab {
+            if self.tab == Tab::Settings {
+                self.controller.send(C::MicPreview(false));
+            }
             self.cancel_edit("");
             self.stop_talk_preview();
             self.tab = tab;
@@ -198,8 +201,8 @@ impl Studio {
 
     fn begin_edit(&mut self, talk: bool) {
         self.stop_talk_preview();
+        self.controller.send(C::MicPreview(false));
         crate::hotkey::set_editing(true);
-        crate::hotkey::take_captured();
         self.editing = Some(talk);
         self.flash = "".into();
         self.controller.send(C::Editing(true));
@@ -249,8 +252,7 @@ impl Studio {
                 return;
             }
             if !binding.valid() {
-                self.flash =
-                    "Para guardar, usa una tecla F, del teclado numérico o una combinación con Ctrl o Alt.".into();
+                self.flash = "Elige una tecla, un botón del mouse o una combinación válida.".into();
                 return;
             }
             self.controller.send(C::Hotkey(binding));
@@ -381,6 +383,9 @@ impl Studio {
             || old.startup != fresh.startup
             || old.update != fresh.update
             || old.progress != fresh.progress
+            || old.mic_preview != fresh.mic_preview
+            || old.mic_preview_ready != fresh.mic_preview_ready
+            || (old.mic_preview_level * 40.).round() != (fresh.mic_preview_level * 40.).round()
             || old.directory != fresh.directory;
         let changed = changed
             || old.seconds != fresh.seconds
@@ -783,6 +788,9 @@ impl Render for Studio {
             .on_action(cx.listener(|_, _: &NextFocus, window, _| window.focus_next()))
             .on_action(cx.listener(|_, _: &PreviousFocus, window, _| window.focus_prev()))
             .on_action(cx.listener(|s, _: &Escape, _, cx| {
+                if s.state.mic_preview {
+                    s.controller.send(C::MicPreview(false));
+                }
                 if s.select.take().is_some() {
                 } else if s.conflict.take().is_some() {
                     s.flash = "Los atajos no cambiaron.".into();
@@ -952,6 +960,9 @@ pub fn run() -> crate::replay::Result<()> {
                                         let visible = tray::visible(this.hwnd);
                                         if !tray::active(this.hwnd) {
                                             this.stop_talk_preview();
+                                            if this.state.mic_preview {
+                                                this.controller.send(C::MicPreview(false));
+                                            }
                                         }
                                         if !visible {
                                             this.select = None;

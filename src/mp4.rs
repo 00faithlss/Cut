@@ -33,7 +33,7 @@ pub struct Video {
 }
 
 pub enum Audio {
-    Separate(Vec<History>),
+    Separate(std::collections::BTreeMap<String, History>),
     Mixed(Option<History>),
 }
 
@@ -68,7 +68,7 @@ pub fn write(
         }
         Audio::Separate(history) => {
             let mut tracks: Vec<_> = history
-                .iter()
+                .values()
                 .filter(|track| {
                     track
                         .packets
